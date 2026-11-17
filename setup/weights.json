@@ -1,0 +1,29 @@
+{
+ "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검에만 쓴다). setup/get_weights.py 가 읽는다.",
+ "dav2_vitl": {
+  "repo": "depth-anything/Depth-Anything-V2-Large",
+  "revision": "cbbb86a30ce19b5684b7a05155dc7e6cbc7685b9",
+  "license": "CC BY-NC 4.0 (비상업 연구용)",
+  "files": {
+   "depth_anything_v2_vitl.pth": {
+    "size": 1341395338,
+    "sha256": "a7ea19fa0ed99244e67b624c72b8580b7e9553043245905be58796a608eb9345"
+   }
+  }
+ },
+ "unidepth_v2_vitl": {
+  "repo": "lpiccinelli/unidepth-v2-vitl14",
+  "revision": "52b349b514bd8b47642f67ac78cb7b5dc5c51dd9",
+  "license": "CC BY-NC 4.0 (공식 코드 저장소의 표기, 비상업 연구용)",
+  "files": {
+   "config.json": {
+    "size": 3848,
+    "git_sha1": "f3243be215e91a135dfe99b54d0718473339b31b"
+   },
+   "model.safetensors": {
+    "size": 1415383604,
+    "sha256": "ba73d3de735302ccc64a50f1e557122050c4b1893e6060b28dba05d6af3e67c6"
+   }
+  }
+ }
+}

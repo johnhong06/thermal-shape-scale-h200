@@ -1,0 +1,15 @@
+# 선생 점검 환경 (run.sh teacher) = 학습 환경 + 공식 UniDepthV2 코드를 불러오는 데 필요한 것.
+# 판은 UniDepthV2 를 실제로 돌려 본 환경 (torch 2.7.1+cu128, 2026-11) 의 것 그대로다. xformers 는 넣지 않는다 (공식 코드에서 선택 — 없으면 torch 의 SDPA).
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1
+torchvision==0.22.1
+huggingface_hub==2.0.0
+numpy==2.2.6
+pillow==12.3.0
+opencv-python-headless==5.0.0.93
+einops==0.8.2
+timm==1.0.30
+wandb==0.30.0
+scipy==1.18.1
+matplotlib==3.11.2
+safetensors==0.8.0

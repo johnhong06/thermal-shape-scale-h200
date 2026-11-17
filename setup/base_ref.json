@@ -1,0 +1,120 @@
+{
+ "_note": "의사 라벨 팔 (pl · plv) 을 base 와 다른 작업에서 돌릴 때 견줄 기준 — 본 실험 1 (2026-11-16, 커밋 b5795d6, base 시드 0 · 1 · 2) 의 화면 출력 [표4] 줄에서 옮긴 시드별 AbsRel (소수 넷째 자리). src/report.py 가 이 작업에 base 가 없을 때만 읽는다.",
+ "source": "본 실험 1 의 값",
+ "seeds": {
+  "0": {
+   "test_day": {
+    "raw": {
+     "abs_rel": 0.0624
+    }
+   },
+   "test_night": {
+    "raw": {
+     "abs_rel": 0.0738
+    }
+   },
+   "test_rainy": {
+    "raw": {
+     "abs_rel": 0.0796
+    }
+   },
+   "fire": {
+    "raw": {
+     "abs_rel": 0.6869
+    },
+    "median": {
+     "abs_rel": 0.2968
+    }
+   },
+   "vivid": {
+    "raw": {
+     "abs_rel": 0.1365
+    },
+    "median": {
+     "abs_rel": 0.1507
+    }
+   },
+   "vivid_day": {
+    "raw": {
+     "abs_rel": 0.147
+    }
+   }
+  },
+  "1": {
+   "test_day": {
+    "raw": {
+     "abs_rel": 0.0615
+    }
+   },
+   "test_night": {
+    "raw": {
+     "abs_rel": 0.0729
+    }
+   },
+   "test_rainy": {
+    "raw": {
+     "abs_rel": 0.0797
+    }
+   },
+   "fire": {
+    "raw": {
+     "abs_rel": 0.7125
+    },
+    "median": {
+     "abs_rel": 0.2964
+    }
+   },
+   "vivid": {
+    "raw": {
+     "abs_rel": 0.1316
+    },
+    "median": {
+     "abs_rel": 0.1439
+    }
+   },
+   "vivid_day": {
+    "raw": {
+     "abs_rel": 0.1379
+    }
+   }
+  },
+  "2": {
+   "test_day": {
+    "raw": {
+     "abs_rel": 0.0621
+    }
+   },
+   "test_night": {
+    "raw": {
+     "abs_rel": 0.0724
+    }
+   },
+   "test_rainy": {
+    "raw": {
+     "abs_rel": 0.0787
+    }
+   },
+   "fire": {
+    "raw": {
+     "abs_rel": 0.6927
+    },
+    "median": {
+     "abs_rel": 0.2968
+    }
+   },
+   "vivid": {
+    "raw": {
+     "abs_rel": 0.1382
+    },
+    "median": {
+     "abs_rel": 0.1504
+    }
+   },
+   "vivid_day": {
+    "raw": {
+     "abs_rel": 0.1438
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,11 @@
+# 학습·평가 환경. H200 에서는 run.sh 가 uv 로 Python 3.12.14 가상환경을 만들고 그 안의 pip 로 이 목록을 설치한다.
+# 판은 앞선 H200 저장소 (trimodal-uav-h200, 2026-11 H200 에서 설치·실행 확인) 와 같은 것만 골랐다.
+# torch 는 cu128 빌드 (H200 sm_90). 설치가 끝나면 run.sh 가 torch·torchvision 판을 제약 파일로 묶는다.
+# opencv 는 headless 판만 (H200 이미지에 libGL 없음) — 우리 코드는 안 쓰고, 공식 Depth Anything V2 의 dpt.py 가 import 한다.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1
+torchvision==0.22.1
+huggingface_hub==1.33.0
+numpy==2.2.6
+pillow==12.3.0
+opencv-python-headless==5.0.0.93
