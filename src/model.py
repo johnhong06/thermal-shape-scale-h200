@@ -231,7 +231,12 @@ def load(encoder, ckpt):
 
 
 def build_teacher(encoder="vitl", weights=""):
-    """선생 = 공식 Depth Anything V2 상대 깊이 모델 (고정). 상대 깊이판 dpt.py 와 metric 판의 차이는 마지막 활성 (ReLU 대 Sigmoid) 과 max_depth 곱뿐이라
+    """선생 = 공식 Depth Anything V2 상대 깊이 모델을 고정한 것 (build_rel 의 설명)."""
+    return build_rel(encoder, weights).eval().requires_grad_(False)
+
+
+def build_rel(encoder="vitl", weights=""):
+    """공식 Depth Anything V2 상대 깊이 모델 (학습할 수 있게). 상대 깊이판 dpt.py 와 metric 판의 차이는 마지막 활성 (ReLU 대 Sigmoid) 과 max_depth 곱뿐이라
     (2026-11-16 두 파일을 대조), metric 판 클래스에 상대 깊이 체크포인트를 전부 싣고 마지막 Sigmoid 를 ReLU 로 바꾸면 같은 모델이 된다. 출력 = 역깊이 꼴의 상대 깊이.
     weights 를 비우면 무작위 초기화 (시험용)."""
     code = os.path.join(os.environ["TD_CODE"], "metric_depth")
@@ -245,7 +250,15 @@ def build_teacher(encoder="vitl", weights=""):
     if not isinstance(last[-1], torch.nn.Sigmoid):
         raise SystemExit("!!! [model] 공식 코드의 헤드 구조가 예상과 다름 (마지막 층이 Sigmoid 가 아님)")
     last[-1] = torch.nn.ReLU()
-    return m.eval().requires_grad_(False)
+    return m
+
+
+def rel_forward(model, x, out_hw, amp=False):
+    """상대 깊이 모델을 학습할 때: 정규화된 입력 (B, 3, H, W) → 역깊이 꼴 (B, out_h, out_w), float32. teacher_disp 와 같은 크기 규칙인데 기울기가 흐른다."""
+    x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
+    with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
+        d = model(x)
+    return F.interpolate(d.float()[:, None], out_hw, mode="bilinear", align_corners=True)[:, 0]
 
 
 @torch.no_grad()

@@ -458,6 +458,16 @@ class Parts(unittest.TestCase):
                 self.assertTrue(j2["tr_structure"]["ok"])                   # 0.0850 ≤ 0.0800 + 0.005
                 self.assertTrue(any(x.startswith("[판정] 구조 점검") and "통과" in x for x in out2))
                 self.assertFalse(any("raw AbsRel:" in x for x in out2))    # 처음 보는 대상을 재지 않았으면 그 줄은 없다
+                os.makedirs(os.path.join(t2, "runs", "rt_s0", "eval"))         # rt: 1 단계의 val 도 표에 · 구조 점검도 같은 기준
+                os.makedirs(os.path.join(t2, "runs", "rt_s0", "rel"))
+                json.dump({k: met(0.075) for k in ("test_day", "test_night", "test_rainy")}, open(os.path.join(t2, "runs", "rt_s0", "eval", "metrics.json"), "w"))
+                json.dump({"val_aligned_abs_rel": 0.071}, open(os.path.join(t2, "runs", "rt_s0", "rel", "done.json"), "w"))
+                with open(os.path.join(t2, "runs", "rt_s0", "val_log.csv"), "w") as f:
+                    f.write("epoch,loss,loss_pl,val_abs_rel,val_rmse,val_d1,val_n\n1,0.1,,0.10,2.5,0.9,16\n2,0.1,,0.09,2.5,0.9,16\n")
+                out3, j3 = summ(t2)
+                self.assertAlmostEqual(j3["rt_structure"]["rt"], 0.095)
+                self.assertFalse(j3["rt_structure"]["ok"])                   # 0.095 > 0.0800 + 0.005
+                self.assertTrue(any("rt 의 상대 깊이 모델 (사진마다 맞춘 뒤) 0.0710" in x for x in out3))
             for arm in ("base", "sep", "ours", "plv"):             # 팔 넷 × 시드 셋도 끝 50 줄 안에 든다 (zip · 끝 줄 포함)
                 for s in range(3):
                     run(t, arm, s, 0.075, base(0))
@@ -517,6 +527,42 @@ class Parts(unittest.TestCase):
         self.assertAlmostEqual(float(C.edge_smooth(ramp, torch.zeros(2, 3, 12, 16))), 0.01, places=6)   # TR2M 식: 평균으로 나누지 않는다 (가로 차의 평균 0.01 + 세로 0)
         rough = torch.rand(2, 12, 16, generator=g) + 0.1
         self.assertTrue(float(C.edge_smooth(rough, torch.zeros(2, 3, 12, 16))) > float(C.edge_smooth(rough, img * 10)))   # 영상의 경계에서는 덜 벌한다
+
+    def test_rel_train(self):
+        M = self.M
+        g = torch.Generator().manual_seed(3)
+        gt = torch.rand(2, 20, 30, generator=g) * 40 + 2
+        m = torch.rand(2, 20, 30, generator=g) < 0.5
+        inv = 1.0 / gt
+        self.assertLess(float(C.ssi_disp(inv * 7.0 + 0.3, gt, m)), 1e-5)          # 배율 · 기준점이 달라도 0
+        p = (inv + torch.rand(2, 20, 30, generator=g) * 0.02).requires_grad_(True)
+        loss = C.ssi_disp(p, gt, m)
+        loss.backward()
+        self.assertTrue(float(loss) > 0.01 and float(p.grad[m].abs().sum()) > 0 and float(p.grad[~m].abs().sum()) == 0)
+        self.assertEqual(float(C.ssi_disp(p, gt, torch.zeros_like(m))), 0.0)     # 쓸 화소가 없으면 0
+        torch.manual_seed(0)
+        rel, teacher = M.build_rel("vits"), M.build_teacher("vits")
+        self.assertTrue(all(q.requires_grad for q in rel.parameters()) and not any(q.requires_grad for q in teacher.parameters()))
+        d = M.rel_forward(rel, torch.randn(2, 3, 256, 640), (256, 640))
+        self.assertEqual(tuple(d.shape), (2, 256, 640))
+        d.mean().backward()
+        self.assertTrue(any(q.grad is not None and float(q.grad.abs().sum()) > 0 for n, q in rel.named_parameters() if "pretrained" in n))
+        import train_rel                                                       # 1 단계를 끝까지 (가짜 묶음, 작은 인코더) → rel.pt 를 TR 이 싣는다
+        with tempfile.TemporaryDirectory() as t:
+            argv = sys.argv
+            sys.argv = ["train_rel", "--encoder", "vits", "--epochs", "2", "--bs", "2", "--workers", "0", "--amp", "0", "--device", "cpu",
+                        "--out", os.path.join(t, "rt_s0", "rel"), "--ckpt", os.path.join(t, "ck")]
+            try:
+                self.assertEqual(train_rel.main(), 0)
+            finally:
+                sys.argv = argv
+            done = json.load(open(os.path.join(t, "rt_s0", "rel", "done.json")))
+            self.assertEqual((done["steps"], done["stage"]), (6, "rel"))                  # 6 장 / 배치 2 × 2 epoch
+            self.assertTrue(os.path.exists(os.path.join(t, "ck", "rel.pt")) and not os.path.exists(os.path.join(t, "ck", "last.pt")))
+            with open(os.path.join(t, "rt_s0", "rel", "val_log.csv")) as f:
+                self.assertEqual(len(f.read().strip().splitlines()), 3)
+            tr = M.build_tr("vits", os.path.join(t, "ck", "rel.pt"))
+            self.assertTrue(all(torch.equal(tr.rel.state_dict()[k], v) for k, v in torch.load(os.path.join(t, "ck", "rel.pt"), weights_only=True).items()))
 
     def test_rel_check(self):
         import rel_check as RC

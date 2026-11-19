@@ -39,6 +39,12 @@ def load(runs):
                     by_ep = {int(row["epoch"]): float(row["val_abs_rel"]) for row in csv.DictReader(f) if row.get("val_abs_rel")}
                 v = [by_ep[e] for e in sorted(by_ep)]
                 r["_val"] = sum(v[-VAL_LAST:]) / len(v[-VAL_LAST:]) if v else None
+            rel = os.path.join(runs, d, "rel", "done.json")              # rt 의 1 단계 (열화상용 상대 깊이 모델) 의 마지막 val — 사진마다 맞춘 뒤
+            if os.path.exists(rel):
+                rj = json.load(open(rel, encoding="utf-8"))
+                r["_rel"] = rj.get("val_aligned_abs_rel")
+                if r["_min"] is not None and rj.get("minutes") is not None:
+                    r["_min"] = round(r["_min"] + rj["minutes"], 1)          # 학습 시간 = 1 단계 + 2 단계
             out.setdefault(m.group(1), {})[int(m.group(2))] = r
     return out
 
@@ -89,7 +95,7 @@ def summary(runs, out):
         ref["base"] = f" ({spec['source']})"
     os.makedirs(out, exist_ok=True)
     L = []
-    order = ("base", "sep", "ours", "tr", "pl", "plv")
+    order = ("base", "sep", "ours", "tr", "rt", "pl", "plv")
     arms = [a for a in order if a in R] + sorted(a for a in R if a not in order)
     zs_names = " | ".join(n for n, _ in ZS)
     L.append("[표1] MS2 test (학습과 같은 데이터) · raw — AbsRel / RMSE / δ1, 시드 평균±표준편차")
@@ -114,13 +120,16 @@ def summary(runs, out):
 
     vlast = {a: [r.get("_val") for r in R[a].values() if r.get("_val") is not None] for a in arms}
     if any(vlast.values()):
-        L.append(f"[표6] MS2 val AbsRel — 마지막 {VAL_LAST} epoch 평균 (시드 평균) | " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in vlast.items() if v))
+        rels = [r["_rel"] for a in arms for r in R[a].values() if r.get("_rel") is not None]
+        L.append(f"[표6] MS2 val AbsRel — 마지막 {VAL_LAST} epoch 평균 (시드 평균) | " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in vlast.items() if v)
+                 + (f" | rt 의 상대 깊이 모델 (사진마다 맞춘 뒤) {sum(rels) / len(rels):.4f} (고정한 공식 모델 0.1267)" if rels else ""))
     J = {}
-    if vlast.get("base") and vlast.get("tr"):                         # 단계 2 의 판정 — 같은 작업의 base 와 견준다 (앞선 작업의 base_ref 에는 val 이 없다)
-        b, t = sum(vlast["base"]) / len(vlast["base"]), sum(vlast["tr"]) / len(vlast["tr"])
-        J["tr_structure"] = {"tr": t, "base": b, "ok": t <= b + VAL_TOL}
-        L.append(f"[판정] 구조 점검 (열화상 판 TR2M 단계 2, MS2 val): tr {t:.4f} · base {b:.4f} + {VAL_TOL} = {b + VAL_TOL:.4f} → "
-                 + ("통과 — 단계 3 으로" if t <= b + VAL_TOL else "못 넘음"))
+    for arm in ("tr", "rt"):                                        # 구조 점검 — 같은 작업의 base 와 견준다 (앞선 작업의 base_ref 에는 val 이 없다)
+        if vlast.get("base") and vlast.get(arm):
+            b, t = sum(vlast["base"]) / len(vlast["base"]), sum(vlast[arm]) / len(vlast[arm])
+            J[arm + "_structure"] = {arm: t, "base": b, "ok": t <= b + VAL_TOL}
+            L.append(f"[판정] 구조 점검 (열화상 판 TR2M, MS2 val): {arm} {t:.4f} · base {b:.4f} + {VAL_TOL} = {b + VAL_TOL:.4f} → "
+                     + ("통과 — 쌍을 더하는 본 실험으로" if t <= b + VAL_TOL else "못 넘음"))
     if "base" in R:
         vals = lambda arm, sets: [v for v in (get(r, sets, "raw", "abs_rel") for r in R[arm].values()) if v is not None]  # noqa: E731
         ms2 = vals("base", MS2)

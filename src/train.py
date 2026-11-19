@@ -19,6 +19,7 @@
         쌍의 크기가 둘이라 (640×512 · 640×298) 한 배치는 한 크기끼리만 묶고, 어느 쪽을 뽑을지는 쌍 수에 비례한 확률로 정한다 (시드 · 스텝으로 정해짐).
   tr    열화상 판 TR2M (model.TR) 을 MS2 만으로 — 고정한 상대 깊이 모델 위의 작은 모듈만 학습한다 (학습률 = base 의 헤드와 같은 lr × 10).
         손실 = SiLog (base 와 같음) + 0.5 × 의사 정답 (common.tr_pseudo) + 0.01 × 맵 매끄러움 (common.edge_smooth, A · B 각각). README '열화상 판 TR2M'.
+  rt    tr 과 같은데, 고정하는 상대 깊이 모델이 공식 체크포인트가 아니라 먼저 MS2 열화상으로 미세조정한 것이다 (src/train_rel.py 가 만든 rel.pt 를 --weights 로).
 
 결과 (--out): train_log.csv (50 스텝마다) · val_log.csv (epoch 마다) · done.json. 체크포인트 (--ckpt): last.pt (이어 하기용, 끝나면 지움) · final.pt (가중치만)
 """
@@ -40,7 +41,7 @@ from common import (MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metric
                     tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
@@ -100,7 +101,7 @@ def main():
     ap.add_argument("--pl_scale_weight", type=float, default=1.0, help="ours: 쌍의 스케일 손실의 비중")
     ap.add_argument("--lr", type=float, default=5e-6)
     ap.add_argument("--encoder", default="vitl")
-    ap.add_argument("--weights", default="", help="상대 깊이 체크포인트 (학생은 인코더만 싣고, 선생은 전부 싣는다). 비우면 무작위 초기화 (시험)")
+    ap.add_argument("--weights", default="", help="상대 깊이 체크포인트 (학생은 인코더만 싣고, 선생 · tr · rt 의 고정 모델은 전부 싣는다). 비우면 무작위 초기화 (시험)")
     ap.add_argument("--limit", type=int, default=0, help="학습 장 수 제한 (smoke)")
     ap.add_argument("--val_limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)
@@ -119,7 +120,7 @@ def main():
     seed_all(a.seed)
     torch.backends.cudnn.benchmark = True                          # 입력 크기가 고정
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
-    sep, tr = a.arm in SEP, a.arm == "tr"
+    sep, tr = a.arm in SEP, a.arm in ("tr", "rt")
     if tr:                                                         # 고정한 상대 깊이 모델 + 작은 모듈 — 모듈만 학습한다
         model = M.build_tr(a.encoder, a.weights).to(dev)
         groups = [{"params": list(model.scalemap.parameters()), "lr": a.lr * 10.0}]
@@ -147,7 +148,7 @@ def main():
         print(f"[train {name}] 이어 하기: epoch {ep0} · step {step}", flush=True)
     p = M.count_params(model)
     print(f"[train {name}] {a.arm} · {a.encoder} · 시드 {a.seed} · train {len(ds):,} 장 · {a.epochs} epoch × {steps_ep} 스텝 (배치 {a.bs}) · "
-          f"파라미터 {p['encoder_m']} + {p['head_m']} M (학습 {p['trainable_m']} M) · amp {int(amp)}", flush=True)
+          f"파라미터 {p['encoder_m']} + {p['head_m']} M (학습 {p['trainable_m']} M) · amp {int(amp)} · 시작 가중치 {os.path.basename(a.weights) if a.weights else '무작위'}", flush=True)
 
     teacher = pds = grid = inside = check = None
     if a.arm in PAIRS:
@@ -263,7 +264,7 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.ckpt, "final.pt"))
     os.remove(last)
     write_json(os.path.join(a.out, "done.json"), {
-        "arm": a.arm, "structure": "tr" if tr else "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr,
+        "arm": a.arm, "structure": a.arm if tr else "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr,
         "lr_groups": [g["base_lr"] for g in groups], "amp": int(amp), "images": len(ds), "steps": step,
         "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else
                  {"sets": LABEL_GROUPS, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight, "scale_weight": a.pl_scale_weight} if lds is not None else None,

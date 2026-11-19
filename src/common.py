@@ -165,6 +165,25 @@ def shape_scale(zn, s, logt, mask, trim=0.0, min_px=MIN_VALID):
 TP_THR = 0.99            # 열화상 판 TR2M 의 의사 정답: 상대 깊이를 정답에 맞춘 깊이의 δ1 이 이보다 큰 사진만 쓴다 (TR2M 공개 코드 SelfThresholdScaleLoss 의 값)
 
 
+def ssi_disp(pred, gt, mask, trim=0.0, min_px=MIN_VALID):
+    """상대 깊이 모델 학습의 손실 — 역깊이 꼴 예측 pred (B, H, W) 와 정답 gt (B, H, W, m) 의 역깊이 1 / gt 를 사진마다 (값 − 중앙값) / 평균 절대 편차 로
+    맞춘 뒤의 절대 오차 평균 (MiDaS 의 스케일 · 기준점 무관 손실, ssi_trim 과 같은 맞춤). trim > 0 이면 큰 오차 그 비율을 버린다. 쓸 화소가 min_px 미만인 사진은 건너뛴다."""
+    def norm(x):
+        x = x - x.median()
+        return x / x.abs().mean().clamp(min=1e-6)
+    total, n = pred.sum() * 0.0, 0
+    for b in range(pred.shape[0]):
+        m = mask[b]
+        if int(m.sum()) < min_px:
+            continue
+        r = (norm(pred[b][m].float()) - norm(1.0 / gt[b][m].float().clamp(min=MIN_DEPTH))).abs()
+        if trim > 0:
+            r = r.topk(max(1, int(r.numel() * (1 - trim))), largest=False).values
+        total = total + r.mean()
+        n += 1
+    return total / max(n, 1)
+
+
 def fit_inv(dr, gt, mask):
     """사진마다 s · dr + t ≈ 1 / gt 를 마스크 화소에서 최소제곱으로 (MiDaS 의 compute_scale_and_shift 와 같은 닫힌 꼴). dr · gt · mask = (B, H, W) → (s, t) 각 (B,), double.
     쓸 화소가 둘 미만이거나 dr 이 한 값뿐이면 그 사진은 (0, 0)."""
