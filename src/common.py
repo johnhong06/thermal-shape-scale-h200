@@ -7,6 +7,8 @@
     median 사진마다 중앙값 맞춤 — MS2 공식 벤치마크 코드 (SupDepth4Thermal eval_metric.py, align=True) 의 방식. 벤치마크 표의 수치와 견줄 때.
     focal  학습 카메라와의 초점거리 비 (fx / FX_TRAIN) 를 곱함 — 카메라가 다른 데이터에서 raw 의 치우침이 초점거리 때문인지 보려고.
   ViViD 만: 정답의 테두리를 뺀다 (border_box) — 선행 논문이 ViViD 를 그렇게 쟀고, 그 표와 견주려는 세트라서.
+
+모양 + 스케일 학생 (팔 sep · ours, README '본 실험 3') 의 손실 = shape_scale. 학생은 모양 zn (log 깊이에서 사진의 중앙값을 뺀 것) 과 스케일 s 를 따로 낸다.
 """
 import json
 import os
@@ -19,7 +21,7 @@ MIN_DEPTH = 1e-3          # m — 공식 Depth Anything V2 metric 학습 (train.
 MAX_DEPTH = 80.0          # m — 평가 상한이자 모델 출력 상한 (Sigmoid × MAX_DEPTH)
 MIN_VALID = 10            # 범위 안 정답 픽셀이 이보다 적은 사진은 건너뜀 (공식 train.py 의 평가와 같음)
 # 열화상 카메라 초점거리 (px, 가로 640 기준). ms2 = calib.npy 의 K_thrL (20 시퀀스 같음) · fire = 저자 firestereo.yaml cam0 · vivid = calib_ther_to_rgb.yaml 의 K_Thermal
-FX = {"ms2": 387.787, "fire": 406.332, "vivid": 437.389}
+FX = {"ms2": 387.787, "fire": 406.332, "vivid": 437.389, "sthereo": 429.433}      # sthereo = thermal_14bit_left.yaml 의 camera_matrix (영상은 왜곡을 편 것)
 FX_TRAIN = FX["ms2"]
 # ViViD 후처리본의 보정값 (calib_ther_to_rgb.yaml) — 영상은 왜곡을 편 것이라 K 만 쓴다. X_rgb = R · X_thermal + T (m).
 # 두 시점의 LiDAR 깊이 지도로 확인: 이 식으로 열화상 시점의 점을 RGB 로 옮기면 99.8 % 가 RGB 시점 깊이와 맞는다 (2026-11-16).
@@ -30,6 +32,8 @@ VIVID_R = ((0.9999117397341355, 0.002936303473050537, 0.012957270691089122), (-0
 VIVID_T = (0.02284737993266349, -0.04897547901167786, 0.033484737180487244)
 PL_TRIM = 0.2             # 의사 라벨 손실에서 사진마다 버리는 큰 오차의 비율 (MiDaS 의 trimmed 손실과 같은 값)
 PL_DARK = 0.08            # RGB 밝기 (0–1, 7×7 평균) 가 이보다 낮은 픽셀은 의사 라벨에서 뺀다 — 선생 (RGB 깊이 모델) 이 볼 수 없는 곳
+PL_MIN, PL_MAX = 0.1, 200.0   # 쌍의 라벨로 쓰는 선생 (UniDepthV2) 깊이의 범위 (m) — 밖의 화소는 뺀다
+S0 = 2.72                 # 스케일 헤드의 시작값 = MS2 학습 정답의 사진별 중앙 깊이 (log) 의 중앙값 — 학습 묶음에서 같은 간격으로 뽑은 608 장에서 잰 값 (15.2 m)
 PL_Z0 = 15.0              # ViViD: RGB 시점의 선생 깊이를 열화상 시점으로 옮길 때 가정하는 거리 (m). 두 카메라가 6 cm 떨어져 있어 5 m 에서 약 4 픽셀, 10 m 밖은 1 픽셀 안의 어긋남
 METRICS = ("abs_rel", "sq_rel", "rmse", "rmse_log", "d1", "d2", "d3")
 VARIANTS = ("raw", "focal", "median")
@@ -133,6 +137,29 @@ def ssi_trim(pred, disp, mask, trim=PL_TRIM):
         total = total + r.topk(max(1, int(r.numel() * (1 - trim))), largest=False).values.mean()
         n += 1
     return total / max(n, 1)
+
+
+def shape_scale(zn, s, logt, mask, trim=0.0, min_px=MIN_VALID):
+    """모양 + 스케일 학생의 손실 — 사진마다 따로 구해 사진 평균. → (모양 손실, 스케일 손실, 쓴 사진 수)
+    zn = 학생의 모양 (B, H, W): log 깊이에서 스케일을 뺀 것 · s = 학생의 스케일 (B,): 그 장면의 중앙 깊이의 log · logt = 목표의 log 깊이 (B, H, W) · mask = 쓸 화소.
+    목표가 정답 (LiDAR) 일 때 trim = 0: 모양 = (logt − zn) 의 표준편차 — SiLog 의 λ = 1 꼴이라 스케일에 무관하다.
+    목표가 선생의 라벨일 때 trim > 0: 모양 = (logt − zn) 에서 중앙값을 뺀 |차| 를 큰 쪽 trim 비율만큼 버리고 평균 (선생이 크게 틀린 화소를 버린다).
+    스케일 = |s − 중앙값 (logt − zn)| — 목표 쪽 (중앙값) 으로는 기울기를 흘리지 않는다. 쓸 화소가 min_px 미만인 사진은 건너뛴다."""
+    shape, scale, n = zn.sum() * 0.0, zn.sum() * 0.0, 0
+    for b in range(zn.shape[0]):
+        m = mask[b]
+        if int(m.sum()) < min_px:
+            continue
+        d = logt[b][m].float() - zn[b][m].float()
+        med = d.median()
+        if trim > 0:
+            r = (d - med).abs()
+            shape = shape + r.topk(max(1, int(r.numel() * (1 - trim))), largest=False).values.mean()
+        else:
+            shape = shape + torch.sqrt((d - d.mean()).pow(2).mean() + 1e-12)
+        scale = scale + (s[b].float() - med.detach()).abs()
+        n += 1
+    return shape / max(n, 1), scale / max(n, 1), n
 
 
 def vivid_grid(h=512, w=640, hr=480, wr=640, z0=PL_Z0):

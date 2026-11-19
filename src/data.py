@@ -4,6 +4,8 @@
   train · val · test_day · test_night · test_rainy   MS2 (분할 목록 = splits/ms2/<이름>_list.txt, 시퀀스 순서 → 프레임 이름순 = 공식 로더 순서)
   fire                                                FIReStereo 저자 test 폴더 전부 (학습에 쓰지 않는 zero-shot 대상)
   vivid · vivid_day                                   ViViD 야외 밤 (night1 · night2 = 선행 논문의 zero-shot 평가) · 낮 (day1 · day2, 참고). 학습에 쓰지 않는다
+  vivid_in                                            ViViD 실내 — 저자 (ThermalSfMLearner-MS) 의 test 시퀀스 다섯. 학습에 쓰지 않는다
+  sthereo                                             STheReO Valley Evening (차량 주행) — 정답은 LiDAR 점을 직접 옮겨 찍어 만든 것 (README '데이터'). 학습에 쓰지 않는다
 묶음에는 이미 솎은 프레임만 들어 있다 (README '데이터') — 여기서는 있는 것을 전부 쓴다.
 
 열화상 → 입력 (tone): 사진마다 1–99 백분위로 자르고 [0, 1] 로 (MS2 공식 벤치마크의 TensorIWMM 과 같은 처리) → 3 채널로 복사 → ImageNet 평균 · 표준편차.
@@ -11,6 +13,7 @@
 증강의 난수는 (시드, epoch, 사진 번호) 로 정한다 → 이어 하기 · 작업자 수와 무관하게 같다.
 
 정답 없는 RGB-열화상 쌍 (Pairs — 의사 라벨 팔 pl · plv 의 학습에만 쓴다. 증강 없음)
+  freiburg · tartan 은 팔 ours 가 쓴다 (PairLabels — 열화상 + 미리 뽑아 둔 선생 라벨, src/labels.py).
   kaist      KAIST 다중분광 보행자, 영상마다 10 장마다 1 장 (640×512, 화소 정렬, 8 비트 JPEG)
   llvip      LLVIP, 3 장마다 1 장 (640×512 로 줄인 것, 화소 정렬, 8 비트 JPEG)
   vivid_day  ViViD 야외 낮 — 열화상은 평가 묶음의 것 (640×512, 16 비트), RGB 는 다른 카메라 (640×480) 라 common.vivid_grid 로 옮겨 쓴다
@@ -28,10 +31,11 @@ from torch.utils.data import Dataset
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MS2_SETS = ("train", "val", "test_day", "test_night", "test_rainy")
-VIVID = {"vivid": ("outdoor_robust_night1", "outdoor_robust_night2"), "vivid_day": ("outdoor_robust_day1", "outdoor_robust_day2")}
-SETS = MS2_SETS + ("fire",) + tuple(VIVID)
-PAIR_SETS = ("kaist", "llvip", "vivid_day")
-EXTRA_PAIR_SETS = ("freiburg", "tartan")       # 추가 쌍 (묶음 종류 pairs2) — 읽는 길만 준비해 두었고 아직 어느 팔도 쓰지 않는다 (README '데이터')
+VIVID = {"vivid": ("outdoor_robust_night1", "outdoor_robust_night2"), "vivid_day": ("outdoor_robust_day1", "outdoor_robust_day2"),
+         "vivid_in": ("indoor_robust_dark", "indoor_robust_varying", "indoor_aggresive_dark", "indoor_unstable_dark", "indoor_aggresive_local")}
+SETS = MS2_SETS + ("fire",) + tuple(VIVID) + ("sthereo",)
+PAIR_SETS = ("kaist", "llvip", "vivid_day", "freiburg", "tartan")
+LABEL_SETS = ("kaist", "llvip", "freiburg", "tartan")       # 팔 ours 가 쓰는 쌍 — 평가 대상 (ViViD) 의 것은 넣지 않는다
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)[:, None, None]
 STD = np.array([0.229, 0.224, 0.225], np.float32)[:, None, None]
 
@@ -51,6 +55,13 @@ def frames(name, root=None):
             img = os.path.join(root, "vivid", s, "Thermal")
             for n in sorted(x for x in (os.listdir(img) if os.path.isdir(img) else []) if x.endswith(".png")):
                 out.append((f"{s}/{n}", os.path.join(img, n), os.path.join(root, "vivid", s, "Depth_T", n)))
+        return out
+    if name == "sthereo":
+        base = os.path.join(root, "sthereo")
+        for q in sorted(os.listdir(base) if os.path.isdir(base) else []):
+            img = os.path.join(base, q, "Thermal")
+            for n in sorted(x for x in (os.listdir(img) if os.path.isdir(img) else []) if x.endswith(".png")):
+                out.append((f"{q}/{n}", os.path.join(img, n), os.path.join(base, q, "Depth_T", n)))
         return out
     with open(os.path.join(HERE, "..", "splits", "ms2", f"{name}_list.txt")) as f:
         seqs = [s.strip() for s in f if s.strip()]
@@ -120,7 +131,7 @@ class Thermal(Dataset):
         self.items = frames(name, root)
         if limit and limit < len(self.items):                       # smoke: 같은 간격으로 limit 장
             self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
-        self.fx_key = "fire" if name == "fire" else "vivid" if name in VIVID else "ms2"
+        self.fx_key = name if name in ("fire", "sthereo") else "vivid" if name in VIVID else "ms2"
         self.border = name in VIVID                                 # 평가 때 정답 테두리를 뺄지 (common.border_box)
 
     def __len__(self):
@@ -155,6 +166,34 @@ class Pairs(Dataset):
         x = (np.repeat(tone(t)[None], 3, 0) - MEAN) / STD
         rgb = (np.asarray(Image.open(rp).convert("RGB"), np.float32).transpose(2, 0, 1) / 255.0 - MEAN) / STD
         return torch.from_numpy(x), torch.from_numpy(np.ascontiguousarray(rgb))
+
+
+def label_path(name, key, root=None):
+    """쌍 (세트, 키) 의 선생 라벨 파일 — src/labels.py 가 쓰고 PairLabels 가 읽는다."""
+    return os.path.join(root or os.environ["TD_DATA"], "labels", name, os.path.splitext(key)[0] + ".png")
+
+
+class PairLabels(Dataset):
+    """쌍 + 미리 뽑아 둔 선생 라벨 → (열화상 입력 (3, H, W), 선생 깊이 (H, W) m — 못 쓰는 화소는 0). 한 세트 안에서는 크기가 같다."""
+
+    def __init__(self, names, limit=0, root=None):
+        self.items = [(n, k, tp) for n in names for k, tp, _ in pair_frames(n, root)]
+        self.root = root
+        if limit and limit < len(self.items):
+            self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        name, key, tp = self.items[i]
+        t = Image.open(tp)
+        t = np.array(t if t.mode in ("L", "I;16", "I") else t.convert("L"))
+        lab = np.array(Image.open(label_path(name, key, self.root)))
+        if lab.dtype != np.uint16 or lab.shape != t.shape:
+            raise ValueError(f"예상과 다른 라벨: {name}/{key} {lab.shape} {lab.dtype} / 열화상 {t.shape}")
+        x = (np.repeat(tone(t)[None], 3, 0) - MEAN) / STD
+        return torch.from_numpy(x), torch.from_numpy(lab.astype(np.float32) / 256.0)
 
 
 def check():

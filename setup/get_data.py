@@ -8,7 +8,7 @@
 끝나면 PNG 개수를 확인하고 <dest>/.done 에 '<종류> <해시>' 를 남긴다 (다시 부르면 건너뜀). 받은 tar 는 풀고 나서 지운다.
 화면에 주소 · 파일 ID 를 찍지 않는다. 표준 라이브러리만 쓴다.
 
-사용: python3 setup/get_data.py --kind smoke|all|teacher|teacher_smoke|pairs2 --dest <폴더> --dl <받을 폴더> [--search /app/data …] [--links <Drive 파일 ID>]
+사용: python3 setup/get_data.py --kind smoke|all|teacher|teacher_smoke --dest <폴더> --dl <받을 폴더> [--search /app/data …] [--links <Drive 파일 ID>]
 """
 import argparse
 import hashlib
@@ -27,6 +27,8 @@ NAME = re.compile(r"^(?:(?:sync_data|proj_depth)/_[0-9-]+/(?:thr|rgb)/(?:img_lef
                   r"|firestereo/[a-z0-9_]+_test/(?:img_left|depth_filtered)/[0-9]+\.png"
                   r"|vivid/outdoor_robust_(?:night|day)[12]/(?:Thermal|Depth_T)/[0-9]+\.png"
                   r"|vivid/outdoor_robust_day[12]/RGB/[0-9]+\.png"
+                  r"|vivid/indoor_[a-z_]+/(?:Thermal|Depth_T)/[0-9]+\.png"
+                  r"|sthereo/sthereo_[0-9]{2}_[a-z_]+/(?:Thermal|Depth_T)/[0-9]{19}\.png"
                   r"|pairs/kaist/set[0-9]{2}/V[0-9]{3}/(?:lwir|visible)/I[0-9]{5}\.jpg"
                   r"|pairs/llvip/(?:infrared|visible)/[0-9]{6}\.jpg"
                   r"|pairs/freiburg/seq_[0-9]{2}_(?:day|night)/[0-9]{2}/(?:ir/[0-9]+_[0-9]+\.png|rgb/[0-9]+_[0-9]+\.jpg)"
@@ -129,7 +131,7 @@ def unpack(tar, dest):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", choices=["smoke", "all", "teacher", "teacher_smoke", "pairs2"], required=True)
+    ap.add_argument("--kind", choices=["smoke", "all", "teacher", "teacher_smoke"], required=True)
     ap.add_argument("--dest", required=True)
     ap.add_argument("--dl", required=True)
     ap.add_argument("--search", nargs="*", default=[])

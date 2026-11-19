@@ -1,6 +1,6 @@
 """평가 — 세트마다 사진별 지표를 구해 평균한다 (규칙은 common.py 맨 위 · README '판정 기준').
 
-  python src/evaluate.py --ckpt <final.pt> --out <폴더> [--sets test_day,test_night,test_rainy,fire,vivid,vivid_day] [--limit N] [--samples 16]
+  python src/evaluate.py --ckpt <final.pt> --out <폴더> [--sets test_day,test_night,test_rainy,fire,vivid,vivid_day,vivid_in,sthereo] [--limit N] [--samples 16]
 결과 (--out): metrics.json (세트 · 예측 종류 (raw · focal · median) 별 평균, fire 는 낮 (hawkins) · 밤비 (frick) 로도 나눔.
                              scale = 사진별 스케일 오차 log (정답 중앙값 / 예측 중앙값) 의 |·| 중앙값 (abs_med) 과 치우침 (bias, 부호 있는 중앙값) — 오차를 스케일 몫과 모양 몫으로 나눠 보려고)
               per_image.csv (사진마다 raw · median 의 AbsRel · RMSE · δ1 과 중앙값 배율)
@@ -22,7 +22,7 @@ import data as D  # noqa: E402
 import model as M  # noqa: E402
 from common import FX, METRICS, VARIANTS, eval_mask, variants, write_json  # noqa: E402
 
-TEST_SETS = ("test_day", "test_night", "test_rainy", "fire", "vivid", "vivid_day")
+TEST_SETS = ("test_day", "test_night", "test_rainy", "fire", "vivid", "vivid_day", "vivid_in", "sthereo")
 
 
 def mean_of(rows):
@@ -83,9 +83,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     name = os.path.basename(os.path.dirname(os.path.normpath(a.out)))
     dev = torch.device(a.device)
-    model = M.build(a.encoder)
-    model.load_state_dict(torch.load(a.ckpt, map_location="cpu", weights_only=True))
-    model.to(dev)
+    model = M.load(a.encoder, a.ckpt).to(dev)
     res = {}
     with open(os.path.join(a.out, "per_image.csv"), "w", newline="") as fh:
         w = csv.writer(fh)

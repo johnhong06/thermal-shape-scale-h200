@@ -1,5 +1,5 @@
 {
- "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검에만 쓴다). setup/get_weights.py 가 읽는다.",
+ "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검과 팔 ours 의 라벨 뽑기에 쓴다). setup/get_weights.py 가 읽는다.",
  "dav2_vitl": {
   "repo": "depth-anything/Depth-Anything-V2-Large",
   "revision": "cbbb86a30ce19b5684b7a05155dc7e6cbc7685b9",

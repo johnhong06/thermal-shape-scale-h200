@@ -1,4 +1,4 @@
-"""부품 시험 (CPU, 가짜 데이터) — 지표 · 손실 · 톤매핑 · 데이터 순서 · 모델 입출력 · 평가 · 표 · 묶음 풀기 · 선생 점검의 계산.
+"""부품 시험 (CPU, 가짜 데이터) — 지표 · 손실 · 톤매핑 · 데이터 순서 · 모델 입출력 (한꺼번에 · 모양 + 스케일) · 평가 · 표 · 묶음 풀기 · 선생 라벨 · 선생 점검의 계산.
 
   TD_CODE=<공식 코드 폴더> <파이썬> -I -B tests/test_parts.py
 TD_CODE 는 setup/fetch_code.sh 가 받은 폴더 (tests/run_local.sh 가 준비한다). 모델은 무작위 초기화한 vits 를 쓴다 (가중치를 받지 않음).
@@ -24,22 +24,24 @@ import data as D  # noqa: E402
 
 def fake_tree(root, rng):
     """작은 가짜 묶음: MS2 분할마다 첫 시퀀스에 3 장 (train 은 두 시퀀스), FIReStereo 낮 · 밤 폴더 2 장씩."""
-    def put(img, dep, n, h):
+    def put(img, dep, n, h, fmt="{:06d}.png"):
         os.makedirs(img, exist_ok=True)
         os.makedirs(dep, exist_ok=True)
         for i in n:
-            Image.fromarray(rng.integers(3000, 6000, (h, 640), dtype=np.uint16)).save(os.path.join(img, f"{i:06d}.png"))
+            Image.fromarray(rng.integers(3000, 6000, (h, 640), dtype=np.uint16)).save(os.path.join(img, fmt.format(i)))
             d = (rng.uniform(2, 60, (h, 640)) * 256).astype(np.uint16)
             d[rng.random((h, 640)) < 0.7] = 0                       # 정답이 드문 LiDAR 처럼
-            Image.fromarray(d).save(os.path.join(dep, f"{i:06d}.png"))
+            Image.fromarray(d).save(os.path.join(dep, fmt.format(i)))
     for name in D.MS2_SETS:
         seqs = [s.strip() for s in open(os.path.join(HERE, "..", "splits", "ms2", f"{name}_list.txt")) if s.strip()]
         for s in seqs[:2 if name == "train" else 1]:
             put(os.path.join(root, "sync_data", s, "thr", "img_left"), os.path.join(root, "proj_depth", s, "thr", "depth_filtered"), (7, 3, 5), 256)
     for d in ("hawkins_9_test", "frick_9_test"):
         put(os.path.join(root, "firestereo", d, "img_left"), os.path.join(root, "firestereo", d, "depth_filtered"), (2, 1), 512)
-    for s in ("outdoor_robust_night1", "outdoor_robust_night2", "outdoor_robust_day1"):
+    for s in ("outdoor_robust_night1", "outdoor_robust_night2", "outdoor_robust_day1", "indoor_robust_dark", "indoor_aggresive_local"):
         put(os.path.join(root, "vivid", s, "Thermal"), os.path.join(root, "vivid", s, "Depth_T"), (4, 2), 512)
+    q = os.path.join(root, "sthereo", "sthereo_09_valley_evening")
+    put(os.path.join(q, "Thermal"), os.path.join(q, "Depth_T"), (1630073700000000002, 1630073700000000001), 512, "{:019d}.png")
     rgb = lambda h, w: Image.fromarray(rng.integers(0, 255, (h, w, 3), dtype=np.uint8))  # noqa: E731
     os.makedirs(os.path.join(root, "vivid", "outdoor_robust_day1", "RGB"))
     for i in (4, 2):
@@ -55,6 +57,13 @@ def fake_tree(root, rng):
         os.makedirs(os.path.join(root, d), exist_ok=True)
         im.save(os.path.join(root, d, n))
     open(os.path.join(root, "pairs", "freiburg", "NOTICE.txt"), "w").write("notice")     # 묶음에 든 안내 파일 — 사진 목록에 섞이면 안 된다
+    for name in D.LABEL_SETS:                                      # 쌍의 선생 라벨 (src/labels.py 가 쓰는 꼴): 깊이 × 256, 못 쓰는 화소는 0
+        for key, tp, _ in D.pair_frames(name, root):
+            h, w = Image.open(tp).size[::-1]
+            lab = (rng.uniform(3, 40, (h, w)) * 256).astype(np.uint16)
+            lab[: h // 8] = 0
+            os.makedirs(os.path.dirname(D.label_path(name, key, root)), exist_ok=True)
+            Image.fromarray(lab).save(D.label_path(name, key, root))
 
 
 class Parts(unittest.TestCase):
@@ -140,6 +149,11 @@ class Parts(unittest.TestCase):
         v = D.Thermal("vivid")
         self.assertEqual([k for k, _, _ in v.items], [f"outdoor_robust_night{i}/{n:06d}.png" for i in (1, 2) for n in (2, 4)])
         self.assertEqual((v.fx_key, v.border, D.Thermal("fire").border, len(D.Thermal("vivid_day"))), ("vivid", True, False, 2))
+        vi, st = D.Thermal("vivid_in"), D.Thermal("sthereo")
+        self.assertEqual([k for k, _, _ in vi.items], [f"{q}/{n:06d}.png" for q in ("indoor_robust_dark", "indoor_aggresive_local") for n in (2, 4)])   # 저자 test 목록의 순서
+        self.assertEqual((vi.fx_key, vi.border, st.fx_key, st.border), ("vivid", True, "sthereo", False))
+        self.assertEqual([k for k, _, _ in st.items], [f"sthereo_09_valley_evening/163007370000000000{n}.png" for n in (1, 2)])
+        self.assertEqual((tuple(st[0][0].shape), tuple(st[0][1].shape), C.FX["sthereo"]), ((3, 512, 640), (512, 640), 429.433))
 
     def test_pairs_extra(self):
         f, t = D.Pairs(["freiburg"]), D.Pairs(["tartan"])
@@ -150,6 +164,112 @@ class Parts(unittest.TestCase):
         x, r = t[0]
         self.assertEqual((tuple(x.shape), tuple(r.shape)), ((3, 512, 640), (3, 512, 640)))
         self.assertTrue(torch.isfinite(x).all() and torch.isfinite(r).all())
+
+    def test_pair_labels(self):
+        ds = D.PairLabels(["kaist", "llvip", "tartan"])
+        self.assertEqual([(n, k) for n, k, _ in ds.items], [("kaist", "set00/V000/I00010.jpg"), ("kaist", "set03/V001/I00000.jpg"), ("llvip", "010001.jpg"),
+                                                           ("tartan", "day1/20250822_115703/00000010.png")])
+        for i in range(len(ds)):
+            x, lab = ds[i]
+            self.assertEqual((tuple(x.shape), tuple(lab.shape), x.dtype, lab.dtype), ((3, 512, 640), (512, 640), torch.float32, torch.float32))
+            self.assertTrue(float(lab[:64].max()) == 0 and 3 <= float(lab[64:].min()) and float(lab.max()) <= 40)     # 위쪽 띠는 못 쓰는 화소 (0)
+        f = D.PairLabels(["freiburg"])
+        self.assertEqual((len(f), tuple(f[0][0].shape), tuple(f[0][1].shape)), (1, (3, 298, 640), (298, 640)))
+        self.assertEqual(D.label_path("kaist", "set00/V000/I00010.jpg", "/r"), "/r/labels/kaist/set00/V000/I00010.png")
+        bad = D.label_path("llvip", "010001.jpg")
+        keep = open(bad, "rb").read()
+        Image.fromarray(np.zeros((10, 10), np.uint16)).save(bad)                # 크기가 다른 라벨은 읽지 않는다
+        with self.assertRaises(ValueError):
+            D.PairLabels(["llvip"])[0]
+        open(bad, "wb").write(keep)
+
+    def test_labels(self):
+        import labels as L
+
+        class Fake:                                                 # UniDepthV2 자리에: 화면 왼쪽 → 오른쪽으로 0.05 – 300 m
+            def infer(self, x8):
+                d = torch.linspace(0.05, 300.0, x8.shape[-1]).expand(x8.shape[0], 1, x8.shape[-2], -1).clone()
+                d[:, :, 0, 5] = float("nan")
+                return {"depth": d}
+        x8 = torch.full((2, 3, 40, 64), 200, dtype=torch.uint8)
+        x8[:, :, 30:] = 0                                              # 아래쪽은 어두움 → 못 쓰는 화소
+        lab = L.label_batch(Fake(), x8)
+        self.assertEqual((tuple(lab.shape), lab.dtype), ((2, 40, 64), torch.float32))
+        ok = lab > 0
+        self.assertTrue(not ok[:, 34:].any() and not ok[:, 0, 5].any())             # 어두운 곳 · 유한하지 않은 값
+        self.assertTrue(float(lab[ok].min()) >= C.PL_MIN and float(lab[ok].max()) <= C.PL_MAX and 0.5 < float(ok[:, :20].float().mean()) < 0.75)   # 0.1–200 m 만
+
+    def test_shape_scale(self):
+        g = torch.Generator().manual_seed(1)
+        zn = torch.randn(3, 20, 30, generator=g) * 0.5
+        zn = zn - zn.flatten(1).median(1).values[:, None, None]
+        s0 = torch.tensor([2.0, 2.5, 3.0])
+        logt = zn + s0[:, None, None]                                  # 목표 = 학생의 모양 그대로 · 스케일만 다름
+        m = torch.rand(3, 20, 30, generator=g) < 0.5
+        sh, sc, n = C.shape_scale(zn, s0, logt, m)
+        self.assertEqual(n, 3)
+        self.assertTrue(float(sh) < 1e-5 and float(sc) < 1e-5)
+        sh, sc, _ = C.shape_scale(zn, s0 + torch.tensor([0.5, -0.5, 0.2]), logt, m)
+        self.assertTrue(float(sh) < 1e-5)
+        self.assertAlmostEqual(float(sc), 0.4, places=5)               # 스케일만 틀림 → 스케일 손실만 (|0.5| + |0.5| + |0.2|) / 3
+        noise = torch.randn(3, 20, 30, generator=g) * 0.3
+        a = C.shape_scale(zn + noise, s0, logt, m)
+        b = C.shape_scale(zn + noise + 1.7, s0, logt, m)               # 모양에 상수를 더해도 모양 손실은 그대로 (스케일에 무관)
+        self.assertTrue(float(a[0]) > 0.2)
+        self.assertAlmostEqual(float(a[0]), float(b[0]), places=5)
+        self.assertTrue(float(a[1]) < 0.05 and abs(float(b[1]) - 1.7) < 0.05)        # 그만큼 스케일의 목표가 옮겨 간다
+        bad = logt.clone()
+        bad[:, :3] += 5.0                                              # 선생이 크게 틀린 화소 15 %
+        t0, t2 = C.shape_scale(zn, s0, bad, torch.ones_like(m), trim=0.0), C.shape_scale(zn, s0, bad, torch.ones_like(m), trim=0.2)
+        self.assertTrue(float(t0[0]) > 1.0 and float(t2[0]) < 1e-5 and float(t2[1]) < 1e-5)     # 큰 쪽 20 % 를 버리면 남지 않는다 · 중앙값은 안 흔들린다
+        few = torch.zeros_like(m)
+        few[:, 0, :5] = True
+        z = zn.clone().requires_grad_(True)
+        sh, sc, n = C.shape_scale(z, s0, logt, few, min_px=100)
+        self.assertEqual((n, float(sh), float(sc)), (0, 0.0, 0.0))
+        (sh + sc).backward()                                           # 쓸 사진이 없어도 기울기가 끊기지 않는다
+        z, sv = (zn + noise).requires_grad_(True), (s0 + 0.3).requires_grad_(True)
+        sh, sc, _ = C.shape_scale(z, sv, logt, m)
+        (sh + sc).backward()
+        self.assertTrue(torch.allclose(sv.grad, torch.full((3,), 1 / 3)))                # 스케일 손실의 기울기 = 부호 / 사진 수
+        self.assertTrue(float(z.grad.abs().sum()) > 0 and float(z.grad[~m].abs().sum()) == 0)
+
+    def test_sep_model(self):
+        M = self.M
+        torch.manual_seed(0)
+        sep = M.Sep(M.build("vits")).eval()
+        x = torch.randn(2, 3, 256, 640)
+        with torch.no_grad():
+            y, sc = sep(torch.nn.functional.interpolate(x, M.net_size(256, 640)))
+            zn, s2 = M.predict_sep(sep, x, (256, 640))
+            p = M.predict(sep, x, (256, 640))
+        self.assertEqual((tuple(y.shape), tuple(sc.shape), tuple(zn.shape), tuple(p.shape)), ((2, 252, 644), (2,), (2, 256, 640), (2, 256, 640)))
+        self.assertTrue(torch.allclose(sc, torch.full((2,), C.S0)) and torch.allclose(s2, sc))           # 처음에는 모든 사진에 S0
+        with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):                                # 혼합 정밀도에서도 모양 · 스케일은 fp32 로 나온다
+            yb, sb = sep(torch.nn.functional.interpolate(x[:1], M.net_size(256, 640)))
+        self.assertEqual((yb.dtype, sb.dtype), (torch.float32, torch.float32))
+        self.assertTrue(float(zn.flatten(1).median(1).values.abs().max()) < 0.05)                        # 모양의 중앙값은 0 (올린 뒤라 조금 어긋난다)
+        self.assertTrue(torch.allclose(p, M.sep_depth(zn, s2)) and C.MIN_DEPTH <= float(p.min()) and float(p.max()) <= C.MAX_DEPTH)
+        self.assertTrue(abs(float(p.median()) - float(np.exp(C.S0))) < 2.0)                              # 처음의 깊이는 15 m 안팎
+        names = [n for n, _ in sep.named_parameters()]
+        self.assertTrue(any("pretrained" in n for n in names) and any(n.startswith("scale_head.") for n in names) and any(n.startswith("net.depth_head.") for n in names))
+        c = M.count_params(sep)
+        self.assertTrue(20 < c["encoder_m"] < 25 and 0.09 < c["scale_head_m"] < 0.11)                    # 384 → 256 → 1
+        with tempfile.TemporaryDirectory() as t:                           # 평가는 저장된 모델의 구조를 스스로 알아본다
+            torch.save(sep.state_dict(), os.path.join(t, "sep.pt"))
+            torch.save(self.model.state_dict(), os.path.join(t, "base.pt"))
+            a, b = M.load("vits", os.path.join(t, "sep.pt")).eval(), M.load("vits", os.path.join(t, "base.pt"))
+            self.assertTrue(isinstance(a, M.Sep) and not isinstance(b, M.Sep))
+            with torch.no_grad():
+                self.assertTrue(torch.allclose(M.predict(a, x, (256, 640)), p, atol=1e-5))
+        # 한 걸음 학습: 모양 · 스케일 손실의 기울기가 인코더 · 헤드 · 스케일 헤드 모두에 닿는다
+        sep.train()
+        gt = torch.rand(2, 256, 640) * 40 + 2
+        zn, sc = M.predict_sep(sep, x, (256, 640))
+        sh, sl, _ = C.shape_scale(zn, sc, torch.log(gt), torch.rand(2, 256, 640) < 0.1)
+        (sh + sl).backward()
+        gr = {n: p_.grad is not None and float(p_.grad.abs().sum()) > 0 for n, p_ in sep.named_parameters()}
+        self.assertTrue(gr["scale_head.2.bias"] and any(v for n, v in gr.items() if n.startswith("net.depth_head.")) and any(v for n, v in gr.items() if "pretrained" in n))
 
     def test_pairs(self):
         ds = D.Pairs(["kaist", "llvip"])
@@ -247,70 +367,91 @@ class Parts(unittest.TestCase):
         self.assertEqual(s["n"], 3)
         s, _ = eval_set(self.model, "vivid", torch.device("cpu"), bs=2, workers=0)
         self.assertEqual((s["n"], s["n_all"]), (4, 4))
+        for name, n in (("vivid_in", 4), ("sthereo", 2)):
+            s, _ = eval_set(self.model, name, torch.device("cpu"), bs=2, workers=0)
+            self.assertEqual((s["n"], s["n_all"]), (n, n))
+        from evaluate import TEST_SETS
+        self.assertEqual(set(TEST_SETS), set(D.SETS) - {"train", "val"})
 
     def test_report(self):
         import contextlib
+        import shutil
         import report as R
 
         def met(a):
             return {v: {k: a for k in C.METRICS} for v in C.VARIANTS} | {"n": 1, "n_all": 1, "scale": {"abs_med": a / 2, "bias": -a / 2}}
-        with tempfile.TemporaryDirectory() as t:
-            for arm, fire in (("base", (0.300, 0.310, 0.305)), ("plv", (0.250, 0.262, 0.255))):
-                for s, f in enumerate(fire):
-                    d = os.path.join(t, "runs", f"{arm}_s{s}", "eval")
-                    os.makedirs(d)
-                    m = {k: met(0.075 + 0.001 * s) for k in ("test_day", "test_night", "test_rainy")} | {"fire": met(f) | {"day": met(f), "night": met(f)}}
-                    m |= {"vivid": met(0.160 + 0.004 * s), "vivid_day": met(0.150)}
-                    json.dump(m, open(os.path.join(d, "metrics.json"), "w"))
+
+        def run(t, arm, s, ms2, zs):
+            d = os.path.join(t, "runs", f"{arm}_s{s}", "eval")
+            os.makedirs(d, exist_ok=True)
+            m = {k: met(ms2) for k in ("test_day", "test_night", "test_rainy")} | {k: met(v) for k, v in zs.items()} | {"vivid_day": met(0.150)}
+            m["fire"] |= {"day": met(zs["fire"]), "night": met(zs["fire"])}
+            json.dump(m, open(os.path.join(d, "metrics.json"), "w"))
+
+        def summ(t):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 R.summary(os.path.join(t, "runs"), os.path.join(t, "summary"))
-            out = buf.getvalue().splitlines()
-            self.assertLessEqual(len(out), 40)                     # run.sh 가 남기는 끝 50 줄 안에 들어가야 한다
+            return buf.getvalue().splitlines(), json.load(open(os.path.join(t, "summary", "summary.json")))["judge"]
+
+        base = lambda s: {"vivid": 0.160 + 0.004 * s, "fire": 0.300 + 0.005 * s, "vivid_in": 0.400 + 0.010 * s, "sthereo": 0.200 + 0.002 * s}  # noqa: E731
+        with tempfile.TemporaryDirectory() as t:
+            for s in range(3):
+                b = base(s)
+                run(t, "base", s, 0.075 + 0.001 * s, b)
+                run(t, "sep", s, 0.0755 + 0.001 * s, {k: v + 0.001 for k, v in b.items()})
+                run(t, "ours", s, 0.076 + 0.001 * s, {"vivid": b["vivid"] - 0.010, "fire": b["fire"] - 0.100, "vivid_in": b["vivid_in"] - 0.100, "sthereo": b["sthereo"] + 0.001})
+            out, j = summ(t)
+            self.assertLessEqual(len(out), 46)                     # run.sh 가 남기는 끝 50 줄 안에 들어가야 한다 (zip · 끝 줄 포함)
             self.assertTrue(all(len(x) < 400 for x in out))
-            j = json.load(open(os.path.join(t, "summary", "summary.json")))["judge"]
-            self.assertTrue(j["gate"]["ok"] and j["gap"]["FIReStereo"]["ok"] and j["gap"]["ViViD 밤"]["ok"])
-            self.assertTrue(j["plv"]["FIReStereo"]["verdict"].startswith("개선"))  # −0.049 < −잡음 폭 0.010, MS2 는 그대로
-            self.assertAlmostEqual(j["plv"]["FIReStereo"]["d_zs"], -0.049333, places=5)
-            self.assertTrue(j["plv"]["ViViD 밤"]["verdict"].startswith("차이 없음"))  # 같은 값 → 잡음 폭 0.008 안
-            self.assertTrue(any(x.startswith("[표5] base") for x in out))
-            self.assertTrue(any(x.startswith("[표6] base  | 0.0380") for x in out))   # MS2 평균 (0.075 + 0.076 + 0.077) / 3 / 2
-            os.remove(os.path.join(t, "runs", "plv_s1", "eval", "metrics.json"))
-            os.remove(os.path.join(t, "runs", "plv_s2", "eval", "metrics.json"))
-            with contextlib.redirect_stdout(io.StringIO()):
-                R.summary(os.path.join(t, "runs"), os.path.join(t, "summary"))
-            self.assertIn("시드가 하나", json.load(open(os.path.join(t, "summary", "summary.json")))["judge"]["plv"]["FIReStereo"]["verdict"])
-            # 이 작업에 base 가 없으면 앞선 작업의 base (setup/base_ref.json 꼴: 시드별 raw AbsRel 만) 를 기준으로 판정한다
-            import shutil
+            self.assertEqual([x.split()[1] for x in out if x.startswith("[표2] ") and "|" in x and not x.startswith("[표2] 처음")], ["base", "sep", "ours"])
+            self.assertTrue(j["gate"]["ok"] and all(j["gap"][k]["ok"] for k in ("vivid", "fire", "vivid_in", "sthereo")))
+            tg = j["ours"]["targets"]
+            self.assertEqual([tg[k]["verdict"] for k in ("vivid", "fire", "vivid_in", "sthereo")], ["개선", "개선", "개선", "차이 없음"])
+            self.assertAlmostEqual(tg["fire"]["noise"], 0.0256)    # 같은 작업의 범위 0.010 보다 앞선 실험의 범위가 넓다 → 넓은 쪽
+            self.assertAlmostEqual(tg["vivid"]["noise"], 0.008)    # 같은 작업의 범위가 더 넓다
+            self.assertAlmostEqual(tg["vivid_in"]["noise"], 0.020)  # 새 대상: 같은 작업의 범위 (MS2 의 바닥 0.0013 보다 넓다)
+            self.assertTrue(j["ours"]["ms2_kept"] and j["ours"]["claim"])                    # MS2 +0.001 ≤ 0.002 · 개선 3 곳 · 나빠진 곳 없음
+            self.assertEqual(([v["verdict"] for v in j["sep"]["targets"].values()], j["sep"]["ms2_kept"], "claim" in j["sep"]), (["차이 없음"] * 4, True, False))   # sep 은 MS2 유지만 본다
+            self.assertTrue(any("구조를 바꿔도 MS2 점수 유지" in x for x in out if x.startswith("[판정] sep")))
+            self.assertTrue(any(x.startswith("[표4] base  | 0.0380") for x in out))          # MS2 평균 (0.075 + 0.076 + 0.077) / 3 / 2
+            self.assertTrue(any("여러 곳에서 개선" in x for x in out if x.startswith("[판정] ours")))
+            for s in range(3):                                     # 한 곳에서 나빠지면 주장이 서지 않는다
+                run(t, "ours", s, 0.076 + 0.001 * s, base(s) | {"vivid": base(s)["vivid"] - 0.010, "vivid_in": base(s)["vivid_in"] - 0.1, "fire": base(s)["fire"] + 0.040})
+            _, j = summ(t)
+            self.assertEqual((j["ours"]["targets"]["fire"]["verdict"], j["ours"]["claim"]), ("나빠짐", False))
+            for s in range(3):                                     # MS2 가 잡음 폭보다 더 나빠져도 서지 않는다
+                run(t, "ours", s, 0.080 + 0.001 * s, {k: v - 0.1 for k, v in base(s).items()})
+            _, j = summ(t)
+            self.assertEqual((j["ours"]["ms2_kept"], j["ours"]["claim"]), (False, False))
+            for s in (1, 2):
+                shutil.rmtree(os.path.join(t, "runs", f"ours_s{s}"))
+            out, j = summ(t)
+            self.assertTrue(j["ours"]["targets"]["fire"]["verdict"] == "판정 안 함" and "claim" not in j["ours"])
+            self.assertTrue(any("시드가 하나" in x for x in out))
+            # 이 작업에 base 가 없으면 앞선 작업의 base (setup/base_ref.json 꼴: 시드별 raw AbsRel 만, 새 대상은 없음) 를 기준으로 판정한다
             for s in range(3):
                 shutil.rmtree(os.path.join(t, "runs", f"base_s{s}"))
-                d = os.path.join(t, "runs", f"pl_s{s}", "eval")
-                os.makedirs(d)
-                m = {k: met(0.075) for k in ("test_day", "test_night", "test_rainy")} | {"fire": met(0.20 + 0.002 * s), "vivid": met(0.12)}
-                json.dump(m, open(os.path.join(d, "metrics.json"), "w"))
+                shutil.rmtree(os.path.join(t, "runs", f"sep_s{s}"))
+                run(t, "pl", s, 0.075, {"fire": 0.20 + 0.002 * s, "vivid": 0.12, "vivid_in": 0.3, "sthereo": 0.2})
+            shutil.rmtree(os.path.join(t, "runs", "ours_s0"))
             ref = {"source": "앞선 작업", "seeds": {str(s): {k: {"raw": {"abs_rel": v}} for k, v in
                    (("test_day", 0.075), ("test_night", 0.075 + 0.001 * s), ("test_rainy", 0.075), ("fire", 0.30 + 0.005 * s), ("vivid", 0.16 + 0.004 * s))} for s in range(3)}}
             old, R.BASE_REF = R.BASE_REF, os.path.join(t, "base_ref.json")
             json.dump(ref, open(R.BASE_REF, "w"))
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                R.summary(os.path.join(t, "runs"), os.path.join(t, "summary"))
+            out, j = summ(t)
             R.BASE_REF = old
-            j = json.load(open(os.path.join(t, "summary", "summary.json")))["judge"]
-            self.assertTrue(j["pl"]["FIReStereo"]["verdict"].startswith("개선") and j["pl"]["ViViD 밤"]["verdict"].startswith("개선"))
-            self.assertIn("(앞선 작업)", buf.getvalue())
-            self.assertLessEqual(len(buf.getvalue().splitlines()), 40)
-            for arm in ("base", "plv"):                            # 팔 셋 × 시드 셋 (한 작업에서 전부 돌릴 때) 도 끝 50 줄 안에 든다 (zip · 끝 줄 2 개 포함)
+            self.assertEqual(({k: v["verdict"] for k, v in j["pl"]["targets"].items()}, "claim" in j["pl"]), ({"vivid": "개선", "fire": "개선"}, False))   # 대상 둘만 견줄 수 있으면 '여러 곳' 은 말하지 않는다
+            self.assertTrue(any("2 곳만 견줄 수 있어" in x for x in out))
+            self.assertTrue(any("(앞선 작업)" in x for x in out))
+            for s in range(3):
+                shutil.rmtree(os.path.join(t, "runs", f"pl_s{s}"))
+            for arm in ("base", "sep", "ours", "plv"):             # 팔 넷 × 시드 셋도 끝 50 줄 안에 든다 (zip · 끝 줄 포함)
                 for s in range(3):
-                    d = os.path.join(t, "runs", f"{arm}_s{s}", "eval")
-                    os.makedirs(d, exist_ok=True)
-                    json.dump({k: met(0.075) for k in ("test_day", "test_night", "test_rainy")} | {"fire": met(0.3) | {"day": met(0.3), "night": met(0.3)}, "vivid": met(0.16), "vivid_day": met(0.15)},
-                              open(os.path.join(d, "metrics.json"), "w"))
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                R.summary(os.path.join(t, "runs"), os.path.join(t, "summary"))
-            self.assertLessEqual(len(buf.getvalue().splitlines()), 46)
-            self.assertTrue(all(len(x) < 400 for x in buf.getvalue().splitlines()))
+                    run(t, arm, s, 0.075, base(0))
+            out, _ = summ(t)
+            self.assertLessEqual(len(out), 46)
+            self.assertTrue(all(len(x) < 400 for x in out))
 
     def test_unpack(self):
         import get_data as G
@@ -319,11 +460,13 @@ class Parts(unittest.TestCase):
             good = ["sync_data/_2021-08-06-10-59-33/thr/img_left/000001.png", "proj_depth/_2021-08-06-10-59-33/thr/depth_filtered/000001.png",
                     "firestereo/frick_2_test/img_left/02250.png", "vivid/outdoor_robust_night1/Thermal/000001.png", "vivid/outdoor_robust_day2/Depth_T/000001.png",
                     "vivid/outdoor_robust_day1/RGB/000001.png", "pairs/kaist/set00/V000/lwir/I00010.jpg", "pairs/llvip/visible/010001.jpg",
+                    "vivid/indoor_robust_dark/Thermal/000001.png", "vivid/indoor_aggresive_local/Depth_T/000321.png",
+                    "sthereo/sthereo_09_valley_evening/Thermal/1630073626519169347.png", "sthereo/sthereo_09_valley_evening/Depth_T/1630073626519169347.png",
                     "sync_data/_2021-08-06-10-59-33/rgb/img_left/000001.png", "proj_depth/_2021-08-06-10-59-33/rgb/depth_filtered/000001.png",   # RGB = 선생 점검용 묶음
                     "pairs/freiburg/seq_02_night/06/ir/1579632394_1905673020.png", "pairs/freiburg/seq_02_night/06/rgb/1579632394_1905673020.jpg",
                     "pairs/tartan/day4/20250828_000502/thermal/00000120.png", "pairs/tartan/day4/20250828_000502/rgb/00000120.jpg"]
             bad = ["../evil.png", "sync_data/_2021-08-06-10-59-33/calib.npy", "sync_data/../../x/thr/img_left/1.png", "firestereo/frick_2_train/img_left/1.png",
-                   "sync_data/_2021-08-06-10-59-33/nir/img_left/000001.png", "/abs/sync_data/_1/thr/img_left/1.png", "vivid/indoor_robust_dark/Thermal/000001.png",
+                   "sync_data/_2021-08-06-10-59-33/nir/img_left/000001.png", "/abs/sync_data/_1/thr/img_left/1.png", "vivid/indoor_robust_dark/RGB/000001.png", "sthereo/sthereo_09_valley_evening/Thermal/1.png", "sthereo/x/Thermal/1630073626519169347.png",
                    "vivid/outdoor_robust_night1/RGB/000001.png", "pairs/kaist/set00/V000/lwir/../../x.jpg", "pairs/other/visible/010001.jpg",
                    "pairs/freiburg/NOTICE.txt", "pairs/tartan/day3/20250826_125213/thermal/../x.png", "pairs/freiburg/seq_00_day/03/ir/a.jpg"]
             with tarfile.open(tar, "w") as tf:

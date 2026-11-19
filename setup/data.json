@@ -1,11 +1,11 @@
 {
- "_note": "실험용 묶음 (tar, 압축 없음). MS2 = 열화상 왼쪽 + 열화상 시점 깊이 (공식 로더의 솎기 규칙: train · val 3 장마다 1 장, test 10 장마다 1 장), FIReStereo = 저자 test 폴더의 왼쪽 열화상 + 깊이, ViViD = 야외 밤 · 낮 네 시퀀스의 열화상 + 열화상 시점 깊이 (선행 준비 스크립트의 속도 기준으로 고른 프레임). 쌍 (pairs_*) = 깊이 정답 없는 RGB-열화상 쌍 (KAIST 보행자 10 장마다 1 장 · LLVIP 3 장마다 1 장을 640×512 로), vivid_day_rgb = ViViD 낮 프레임의 RGB. smoke = 위에서 몇 장씩. 'png' = 풀리는 사진 수 (PNG · JPEG). 2026-11-16 로컬에서 만들어 크기 · sha256 · 개수를 확인한 값. 묶음은 이 저장소에 없고 받는 주소도 적지 않는다 (다시 배포하면 안 되는 데이터) — 관리자가 /app/data 에 올려 둔 사본을 크기와 sha256 으로 찾아 쓴다. setup/get_data.py · setup/check.py · src/data.py 가 읽는다. 선생 점검용 (2026-11-17): ms2_rgb_* = MS2 의 RGB 왼쪽 + RGB 시점 깊이 (train 30 장마다 1 장 · val 10 장마다 1 장, test 분할은 넣지 않음), smoke_teacher = 거기서 8 장씩. 추가 쌍 (2026-11-17, kind pairs2 — 아직 어느 팔도 쓰지 않아 지금의 모드는 받지 않는다): pairs_freiburg = Freiburg Thermal 2 장마다 1 장을 640×298 로, pairs_tartan = TartanRGBT 1 · 2 · 4 · 5 일차를 1 초에 1 장.",
+ "_note": "실험용 묶음 (tar, 압축 없음). MS2 = 열화상 왼쪽 + 열화상 시점 깊이 (공식 로더의 솎기 규칙: train · val 3 장마다 1 장, test 10 장마다 1 장), FIReStereo = 저자 test 폴더의 왼쪽 열화상 + 깊이, ViViD = 야외 밤 · 낮 네 시퀀스의 열화상 + 열화상 시점 깊이 (선행 준비 스크립트의 속도 기준으로 고른 프레임). 쌍 (pairs_*) = 깊이 정답 없는 RGB-열화상 쌍 (KAIST 보행자 10 장마다 1 장 · LLVIP 3 장마다 1 장을 640×512 로), vivid_day_rgb = ViViD 낮 프레임의 RGB. smoke = 위에서 몇 장씩. 'png' = 풀리는 사진 수 (PNG · JPEG). 2026-11-16 로컬에서 만들어 크기 · sha256 · 개수를 확인한 값. 묶음은 이 저장소에 없고 받는 주소도 적지 않는다 (다시 배포하면 안 되는 데이터) — 관리자가 /app/data 에 올려 둔 사본을 크기와 sha256 으로 찾아 쓴다. setup/get_data.py · setup/check.py · src/data.py 가 읽는다. 선생 점검용 (2026-11-17): ms2_rgb_* = MS2 의 RGB 왼쪽 + RGB 시점 깊이 (train 30 장마다 1 장 · val 10 장마다 1 장, test 분할은 넣지 않음), smoke_teacher = 거기서 8 장씩. 추가 쌍 (2026-11-17, kind pairs2 — 아직 어느 팔도 쓰지 않아 지금의 모드는 받지 않는다): pairs_freiburg = Freiburg Thermal 2 장마다 1 장을 640×298 로, pairs_tartan = TartanRGBT 1 · 2 · 4 · 5 일차를 1 초에 1 장. 2026-11-18: 평가 묶음 둘을 더함 — vivid_indoor = ViViD 실내의 저자 test 시퀀스 다섯 (야외와 같은 규칙), sthereo = STheReO Valley Evening 의 열화상 (왜곡을 편 것) + LiDAR 점을 직접 옮겨 찍어 만든 깊이 (README '데이터'). 추가 쌍 둘 (pairs_freiburg · pairs_tartan) 은 팔 ours 가 쓰게 되어 종류를 all 로 바꿈. smoke 묶음도 새 세트를 넣어 다시 만듦.",
  "files": {
   "smoke.tar": {
    "kind": "smoke",
-   "size": 45608960,
-   "sha256": "d197e1fa52e080dbc6280bd15a81c16daa6f9694f4df3adc7265395676c6f168",
-   "png": 312
+   "size": 56535040,
+   "sha256": "5271f47893d4d09b7e726014c32f1f3b56a96917c2b7e848d49da52ed7c89587",
+   "png": 408
   },
   "train.tar": {
    "kind": "all",
@@ -49,6 +49,18 @@
    "sha256": "a6097ad4f009ee8345e9655d290fb41971ecaefe10d9b51900d30fff2e1a76d7",
    "png": 8464
   },
+  "vivid_indoor.tar": {
+   "kind": "all",
+   "size": 620851200,
+   "sha256": "8ff4fce0b24e2b1e6d797c16516377106ae9afd734b063e257d8e6aec7fe3fc2",
+   "png": 3894
+  },
+  "sthereo.tar": {
+   "kind": "all",
+   "size": 255836160,
+   "sha256": "ab35c4198d3699d1f1de31f3f51dcc7ff9e55d523ca70776391e0ec3a6a3790b",
+   "png": 1752
+  },
   "pairs_kaist.tar": {
    "kind": "all",
    "size": 3877734400,
@@ -86,13 +98,13 @@
    "png": 32
   },
   "pairs_freiburg.tar": {
-   "kind": "pairs2",
+   "kind": "all",
    "size": 2005514240,
    "sha256": "c5093158f009191eca5dc9fb036f691b47e0f4b7c290e17c4e19368fbd1a1a9f",
    "png": 20876
   },
   "pairs_tartan.tar": {
-   "kind": "pairs2",
+   "kind": "all",
    "size": 2255431680,
    "sha256": "27c3137aac69141e94080eec7fa4346afbb97227c34f802382d26c76067c276f",
    "png": 24172
@@ -110,7 +122,11 @@
    "vivid_day": 2213,
    "pair_kaist": 9546,
    "pair_llvip": 5163,
-   "pair_vivid_day": 2213
+   "pair_vivid_day": 2213,
+   "vivid_in": 1947,
+   "sthereo": 876,
+   "pair_freiburg": 10438,
+   "pair_tartan": 12086
   },
   "smoke": {
    "train": 48,
@@ -123,7 +139,11 @@
    "vivid_day": 8,
    "pair_kaist": 16,
    "pair_llvip": 16,
-   "pair_vivid_day": 8
+   "pair_vivid_day": 8,
+   "vivid_in": 8,
+   "sthereo": 8,
+   "pair_freiburg": 16,
+   "pair_tartan": 16
   }
  }
 }

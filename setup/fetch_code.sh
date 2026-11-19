@@ -2,7 +2,7 @@
 # 공식 코드 받기 (H200·로컬 공용, git 없이): 저장소를 고정 커밋의 GitHub 압축본 (codeload.github.com/<저장소>/tar.gz/<커밋>) 으로 받아,
 # 쓰는 파일만 <dest> 에 풀고 파일마다 목록 (sha256) 과 대조한다.
 #   dav2 (기본)  DepthAnything/Depth-Anything-V2 — metric_depth/depth_anything_v2/ · LICENSE (setup/code.sha256)
-#   unidepth     lpiccinelli-eth/UniDepth — unidepth/ 꾸러미 · LICENSE (setup/code_unidepth.sha256). 선생 점검 (run.sh teacher) 에만 쓴다. 하나라도 다르거나 빠지면 실패. 이미 맞게 받았으면 건너뛴다 (.commit). 끊기면 30 초 쉬고 3 번까지.
+#   unidepth     lpiccinelli-eth/UniDepth — unidepth/ 꾸러미 · LICENSE (setup/code_unidepth.sha256). 선생 점검 (run.sh teacher) 과 팔 ours 의 라벨 뽑기 (src/labels.py) 에 쓴다. 하나라도 다르거나 빠지면 실패. 이미 맞게 받았으면 건너뛴다 (.commit). 끊기면 30 초 쉬고 3 번까지.
 # 이 코드는 저장소에 넣지 않고 고치지 않는다 — 우리 코드 (src/model.py · src/teacher_check.py) 가 불러 쓴다.
 # 사용: bash setup/fetch_code.sh <dest> [dav2|unidepth]
 set -euo pipefail

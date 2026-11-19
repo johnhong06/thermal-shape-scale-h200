@@ -10,24 +10,24 @@
 bash run.sh check LINKS=<값>                 # 1–2분, 설치 없음
 bash run.sh teacher KIND=smoke LINKS=<값>    # 선생 점검을 작은 데이터로 끝까지 (학습 없음)
 bash run.sh teacher LINKS=<값>               # 선생 점검 (학습 없음)
-bash run.sh smoke LINKS=<값>                 # 학습 · 평가를 작은 데이터로 끝까지
-bash run.sh all LINKS=<값>                   # 본 실험
+bash run.sh smoke LINKS=<값>                 # 선생 라벨 → 학습 · 평가를 작은 데이터로 끝까지
+bash run.sh all LINKS=<값>                   # 본 실험 (선생 라벨 → 학습 · 평가, 18–19시간으로 어림)
 ```
 
 - 저장소, 이슈, 명령 어디에도 토큰이나 비밀번호가 없습니다. 필요한 것은 모두 로그인 없이 받습니다. `LINKS`는 데이터 묶음을 받을 곳의 목록을 가리키는 값이고 자격 증명이 아닙니다.
 - 패키지는 작업이 스스로 설치합니다(uv로 만든 가상환경, `/app/scratch/thermal` 아래).
 - 쓰는 경로는 `/app/scratch/thermal`(작업 폴더)과 `/app/output/<작업 이름>`(결과)뿐입니다. `/app/data`는 읽기만 합니다.
-- 필요한 공간은 작업 폴더 약 60 GB, 결과 1 GB 미만입니다. 명령에 `CKPT=keep`이 있으면 학습한 모델(하나에 1.3 GB, 많으면 9개)을 결과 폴더의 `ckpt/`에 남기므로 약 12 GB가 더 듭니다. 뒤의 평가 작업(`eval` 모드)이 읽는 파일이라 실험이 끝날 때까지 두어 주시기 바랍니다.
+- 필요한 공간은 작업 폴더 약 80 GB(데이터 22 GiB, 풀어 놓은 것, 선생 라벨 약 15 GB, 환경과 가중치), 결과 1 GB 미만입니다. 명령에 `CKPT=keep`이 있으면 학습한 모델(하나에 1.3 GB, 많으면 9개)을 결과 폴더의 `ckpt/`에 남기므로 약 12 GB가 더 듭니다. 뒤의 평가 작업(`eval` 모드)이 읽는 파일이라 실험이 끝날 때까지 두어 주시기 바랍니다.
 
 ## 받는 것
 
 | 대상 | 받는 곳 | 크기 |
 |---|---|---|
-| 학습 · 평가 데이터 묶음 (선생 점검 모드는 그 가운데 2.8 GiB 만, 추가 쌍 4.0 GiB 는 아직 받지 않음) | Google Drive (링크 공유 파일) | 23.6 GiB |
+| 학습 · 평가 데이터 묶음 (`smoke` · `all` 모드. 선생 점검 모드는 따로 2.8 GiB) | Google Drive (링크 공유 파일) | 21.6 GiB |
 | Depth Anything V2 ViT-L 가중치 | Hugging Face | 1.3 GB |
 | Depth Anything V2 코드 | GitHub (고정 커밋) | 수 MB |
-| UniDepthV2 ViT-L 가중치 (`teacher` 모드만) | Hugging Face | 1.4 GB |
-| UniDepth 코드 (`teacher` 모드만) | GitHub (고정 커밋) | 22 MB |
+| UniDepthV2 ViT-L 가중치 (`teacher` 모드, 그리고 `smoke` · `all` 모드의 선생 라벨 단계) | Hugging Face | 1.4 GB |
+| UniDepth 코드 (위와 같은 때) | GitHub (고정 커밋) | 22 MB |
 | 파이썬 패키지 | PyPI · PyTorch 휠 색인 | 약 6 GB |
 
 ## 데이터를 받지 못할 때
@@ -36,7 +36,7 @@ bash run.sh all LINKS=<값>                   # 본 실험
 
 | 파일 | 크기 (바이트) | sha256 |
 |---|---|---|
-| `smoke.tar` | 45,608,960 | `d197e1fa52e080dbc6280bd15a81c16daa6f9694f4df3adc7265395676c6f168` |
+| `smoke.tar` | 56,535,040 | `5271f47893d4d09b7e726014c32f1f3b56a96917c2b7e848d49da52ed7c89587` |
 | `train.tar` | 5,741,977,600 | `4f81d06e1b3ca4a6b48683db9e240b3648e98aa237a47819e9f44e92f5432ed9` |
 | `val.tar` | 1,110,333,440 | `2769b33f55092cdf69caef739a1564050411dd1e83988df5db11aa9c99b9b84a` |
 | `test_day.tar` | 543,303,680 | `13e53a6bd874485539d341348cd418aa0c2175ee48fb6797326f8292de04ac03` |
@@ -44,6 +44,8 @@ bash run.sh all LINKS=<값>                   # 본 실험
 | `test_rainy.tar` | 518,563,840 | `615cb2c7624ffa966449fb0baa294af373afbdf8a65e119e3ee5585ed7d41c72` |
 | `firestereo_test.tar` | 2,717,808,640 | `69c571add7aaf2934263b67ea29b585c92b59b745e0bd71e512802dcf31b5855` |
 | `vivid.tar` | 1,300,643,840 | `a6097ad4f009ee8345e9655d290fb41971ecaefe10d9b51900d30fff2e1a76d7` |
+| `vivid_indoor.tar` | 620,851,200 | `8ff4fce0b24e2b1e6d797c16516377106ae9afd734b063e257d8e6aec7fe3fc2` |
+| `sthereo.tar` | 255,836,160 | `ab35c4198d3699d1f1de31f3f51dcc7ff9e55d523ca70776391e0ec3a6a3790b` |
 | `pairs_kaist.tar` | 3,877,734,400 | `dd950c773e077ae235dceb1fbac2535e1c149f1c33335299579f6bfc96cf2bbe` |
 | `pairs_llvip.tar` | 766,423,040 | `b95946d2732aa5d2dcecfb1b68e358235b598c368d82222bb7e640e7fa837062` |
 | `vivid_day_rgb.tar` | 929,638,400 | `4397f6618559b6dc44ae4acd23cd11c0eace2584c68d983c09b1dddd3ee4ae4c` |

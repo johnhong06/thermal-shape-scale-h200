@@ -12,12 +12,18 @@
   plv   pl 과 같은 방식인데 쌍이 ViViD 야외 낮 (평가할 데이터의 다른 분할 = 선행 논문의 '대상 데이터에 적응' 설정을 우리 파이프라인으로 옮긴 비교 팔).
         ViViD 는 RGB 와 열화상 카메라가 달라 선생 출력을 열화상 시점으로 옮겨 쓴다 (common.vivid_grid).
   plv 는 시작할 때 선생을 확인한다: ViViD 낮의 LiDAR 정답에 선생 출력 (축척 · 이동을 맞춘 것) 을 대 본 AbsRel · δ1 을 한 줄 찍는다 (pl 은 ViViD 를 읽지 않는다).
+  sep   모양 + 스케일 학생 (model.Sep) 을 MS2 만으로. 손실 = 모양 (정답 화소에서 log 깊이 차의 표준편차) + 스케일 (|s − 정답에서 구한 스케일|) — common.shape_scale.
+        구조와 손실만 바꾼 줄: 스텝 수 · 학습률 · 증강은 base 와 같다 (스케일 헤드의 학습률은 DPT 헤드와 같다).
+  ours  sep + 스텝마다 쌍 배치 하나 (KAIST · LLVIP · Freiburg · TartanRGBT). 쌍의 목표는 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이 (src/labels.py):
+        모양 = 중앙값을 맞춘 log 깊이 차의 절대값을 큰 쪽 20 % 버리고 평균, 스케일 = |s − 선생의 스케일|. 학습 중에는 선생을 돌리지 않는다.
+        쌍의 크기가 둘이라 (640×512 · 640×298) 한 배치는 한 크기끼리만 묶고, 어느 쪽을 뽑을지는 쌍 수에 비례한 확률로 정한다 (시드 · 스텝으로 정해짐).
 
 결과 (--out): train_log.csv (50 스텝마다) · val_log.csv (epoch 마다) · done.json. 체크포인트 (--ckpt): last.pt (이어 하기용, 끝나면 지움) · final.pt (가중치만)
 """
 import argparse
 import csv
 import os
+import random
 import sys
 import time
 
@@ -28,11 +34,13 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import MAX_DEPTH, MIN_DEPTH, PL_DARK, depth_metrics, eval_mask, seed_all, silog, ssi_trim, vivid_grid, write_json  # noqa: E402
+from common import MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metrics, eval_mask, seed_all, shape_scale, silog, ssi_trim, vivid_grid, write_json  # noqa: E402
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv")
+ARMS = ("base", "pl", "plv", "sep", "ours")
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
+SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
+LABEL_GROUPS = (("kaist", "llvip", "tartan"), ("freiburg",))     # ours 의 쌍 — 크기가 같은 것끼리 (640×512 · 640×298)
 
 
 def bright(rgb):
@@ -84,7 +92,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--pair_bs", type=int, default=8, help="쌍 배치 (512×640 이라 MS2 배치 16 장과 화소 수가 같다)")
-    ap.add_argument("--pl_weight", type=float, default=1.0)
+    ap.add_argument("--pl_weight", type=float, default=1.0, help="쌍 손실의 비중 (ours 에서는 쌍의 모양 손실)")
+    ap.add_argument("--pl_scale_weight", type=float, default=1.0, help="ours: 쌍의 스케일 손실의 비중")
     ap.add_argument("--lr", type=float, default=5e-6)
     ap.add_argument("--encoder", default="vitl")
     ap.add_argument("--weights", default="", help="상대 깊이 체크포인트 (학생은 인코더만 싣고, 선생은 전부 싣는다). 비우면 무작위 초기화 (시험)")
@@ -106,7 +115,9 @@ def main():
     seed_all(a.seed)
     torch.backends.cudnn.benchmark = True                          # 입력 크기가 고정
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
-    model = M.build(a.encoder, a.weights).to(dev)
+    sep = a.arm in SEP
+    model = M.build(a.encoder, a.weights)
+    model = (M.Sep(model) if sep else model).to(dev)
     enc = [p for n, p in model.named_parameters() if "pretrained" in n]
     head = [p for n, p in model.named_parameters() if "pretrained" not in n]
     opt = torch.optim.AdamW([{"params": enc, "lr": a.lr}, {"params": head, "lr": a.lr * 10.0}], lr=a.lr, betas=(0.9, 0.999), weight_decay=0.01)
@@ -140,21 +151,28 @@ def main():
         print(f"[train {name}] 쌍 {' + '.join(PAIRS[a.arm])} {len(pds):,} 개 (배치 {a.pair_bs}, 손실 비중 {a.pl_weight}) · 선생 확인 (ViViD 낮 LiDAR 대비, 축척 · 이동 맞춤): "
               + (f"AbsRel {check['abs_rel']:.4f} δ1 {check['d1']:.4f} ({check['n']} 장)" if check else "안 함" if a.arm != "plv" else "건너뜀 (ViViD 낮 자료 없음)"), flush=True)
 
-    def pair_batches():                                            # 쌍을 끝없이 돈다 (한 바퀴마다 다시 섞음). 이어 할 때는 새 순서로 시작
+    def pair_batches(d=None, salt=0):                              # 쌍을 끝없이 돈다 (한 바퀴마다 다시 섞음). 이어 할 때는 새 순서로 시작
         k = 0
         while True:
             g = torch.Generator()
-            g.manual_seed(a.seed * 100003 + step * 31 + k)
-            yield from DataLoader(pds, batch_size=a.pair_bs, shuffle=True, generator=g, num_workers=a.workers // 2, drop_last=True, pin_memory=dev.type == "cuda")
+            g.manual_seed(a.seed * 100003 + step * 31 + k + salt * 7)
+            yield from DataLoader(pds if d is None else d, batch_size=a.pair_bs, shuffle=True, generator=g, num_workers=a.workers // 2, drop_last=True, pin_memory=dev.type == "cuda")
             k += 1
     pit = pair_batches() if pds is not None else None
+    lds = lits = None
+    if a.arm == "ours":                                            # 쌍 + 미리 뽑아 둔 선생 라벨, 크기별로 따로
+        lds = [d for d in (D.PairLabels(g, a.limit) for g in LABEL_GROUPS) if len(d) >= a.pair_bs]
+        if not lds:
+            raise SystemExit(f"!!! [train {name}] 쌍이 쌍 배치 {a.pair_bs} 보다 적음")
+        lits = [pair_batches(d, i + 1) for i, d in enumerate(lds)]
+        print(f"[train {name}] 쌍 (선생 라벨) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, 비중 모양 {a.pl_weight} · 스케일 {a.pl_scale_weight})", flush=True)
 
     new = not (a.resume and step > 0 and os.path.exists(os.path.join(a.out, "train_log.csv")))
     fh = open(os.path.join(a.out, "train_log.csv"), "w" if new else "a", newline="")
     vh = open(os.path.join(a.out, "val_log.csv"), "w" if new else "a", newline="")
     log, vlog = csv.writer(fh), csv.writer(vh)
     if new:
-        log.writerow(["epoch", "step", "loss", "loss_pl", "lr", "sec"])
+        log.writerow(["epoch", "step", "loss", "loss_pl", "lr", "sec", "ms2_scale", "pl_scale"])
         vlog.writerow(["epoch", "loss", "loss_pl", "val_abs_rel", "val_rmse", "val_d1", "val_n"])
     t_start = time.time()
     for ep in range(ep0, a.epochs):
@@ -163,13 +181,19 @@ def main():
         g = torch.Generator()
         g.manual_seed(a.seed * 1000 + ep)                          # 이어 해도 같은 순서
         loader = DataLoader(ds, batch_size=a.bs, shuffle=True, generator=g, num_workers=a.workers, drop_last=True, pin_memory=dev.type == "cuda")
-        t0, run, run_pl, n = time.time(), 0.0, 0.0, 0
+        t0, run, run_pl, run_sc, run_psc, n = time.time(), 0.0, 0.0, 0.0, 0.0, 0
         for x, gt, _ in loader:
             x, gt = x.to(dev, non_blocking=True), gt.to(dev, non_blocking=True)
             lr = a.lr * (1 - step / total) ** 0.9
             opt.param_groups[0]["lr"], opt.param_groups[1]["lr"] = lr, lr * 10.0
-            pred = M.predict(model, x, gt.shape[-2:], amp)
-            loss = silog(pred, gt, (gt >= MIN_DEPTH) & (gt <= MAX_DEPTH))
+            ok = (gt >= MIN_DEPTH) & (gt <= MAX_DEPTH)
+            sc = psc = None
+            if sep:
+                zn, s_hat = M.predict_sep(model, x, gt.shape[-2:], amp)
+                sh, sc, _ = shape_scale(zn, s_hat, torch.log(gt.clamp(min=MIN_DEPTH)), ok)
+                loss = sh + sc
+            else:
+                loss = silog(M.predict(model, x, gt.shape[-2:], amp), gt, ok)
             lp = None
             opt.zero_grad()
             if torch.isfinite(loss):
@@ -180,6 +204,14 @@ def main():
                     lp = ssi_trim(M.predict(model, xt, xt.shape[-2:], amp), disp, ok)
                     if torch.isfinite(lp):
                         (a.pl_weight * lp).backward()
+                if lits is not None:
+                    gi = random.Random(a.seed * 1000003 + step).choices(range(len(lds)), weights=[len(d) for d in lds])[0]   # 전체 스텝 < 1000003 이라 시드끼리 안 겹친다
+                    xt, lab = (t.to(dev, non_blocking=True) for t in next(lits[gi]))
+                    zn, s_hat = M.predict_sep(model, xt, xt.shape[-2:], amp)
+                    psh, psc, _ = shape_scale(zn, s_hat, torch.log(lab.clamp(min=PL_MIN)), lab > 0, PL_TRIM, 100)
+                    lp = a.pl_weight * psh + a.pl_scale_weight * psc
+                    if torch.isfinite(lp):
+                        lp.backward()
             if not torch.isfinite(loss) or (lp is not None and not torch.isfinite(lp)):
                 write_json(os.path.join(a.out, "fail.json"), {"epoch": ep, "step": step, "why": "loss 가 유한하지 않음"})
                 print(f"!!! [train {name}] epoch {ep + 1} step {step}: loss 가 유한하지 않음 — 멈춤", flush=True)
@@ -188,17 +220,22 @@ def main():
             step += 1
             run += loss.item()
             run_pl += lp.item() if lp is not None else 0.0
+            run_sc += sc.item() if sc is not None else 0.0
+            run_psc += psc.item() if psc is not None else 0.0
             n += 1
             if step % 50 == 0 or step == 1:
-                log.writerow([ep + 1, step, round(loss.item(), 5), round(lp.item(), 5) if lp is not None else "", f"{lr:.3g}", round(time.time() - t_start, 1)])
+                log.writerow([ep + 1, step, round(loss.item(), 5), round(lp.item(), 5) if lp is not None else "", f"{lr:.3g}", round(time.time() - t_start, 1),
+                              round(sc.item(), 5) if sc is not None else "", round(psc.item(), 5) if psc is not None else ""])
                 fh.flush()
         sec = time.time() - t0
         v, _ = eval_set(model, "val", dev, a.val_limit, a.bs * 2, min(a.workers, 4), amp)
-        vlog.writerow([ep + 1, round(run / max(n, 1), 5), round(run_pl / max(n, 1), 5) if pit is not None else "",
+        has_pl = pit is not None or lits is not None
+        vlog.writerow([ep + 1, round(run / max(n, 1), 5), round(run_pl / max(n, 1), 5) if has_pl else "",
                        round(v["raw"]["abs_rel"], 5), round(v["raw"]["rmse"], 4), round(v["raw"]["d1"], 5), v["n"]])
         vh.flush()
         mem = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
-        print(f"[train {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f}" + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if pit is not None else "")
+        print(f"[train {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f}" + (f" (스케일 {run_sc / max(n, 1):.4f})" if sep else "")
+              + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if has_pl else "") + (f" (스케일 {run_psc / max(n, 1):.4f})" if lits is not None else "")
               + f" · val AbsRel {v['raw']['abs_rel']:.4f} RMSE {v['raw']['rmse']:.3f} δ1 {v['raw']['d1']:.4f} · "
               f"{sec / 60:.1f} 분 ({sec / max(n, 1):.2f} 초/스텝, 전체 {total} 스텝이면 약 {sec / max(n, 1) * total / 3600:.1f} 시간) · GPU 최대 {mem:.1f} GiB", flush=True)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": ep + 1, "rng": torch.get_rng_state()}, last + ".tmp")
@@ -208,8 +245,9 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.ckpt, "final.pt"))
     os.remove(last)
     write_json(os.path.join(a.out, "done.json"), {
-        "arm": a.arm, "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp), "images": len(ds), "steps": step,
-        "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else None,
+        "arm": a.arm, "structure": "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp), "images": len(ds), "steps": step,
+        "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else
+                 {"sets": LABEL_GROUPS, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight, "scale_weight": a.pl_scale_weight} if lds is not None else None,
         "minutes": round((time.time() - t_start) / 60, 1), "gpu_peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2) if dev.type == "cuda" else None,
         "params": p})
     print(f"[train {name}] 끝 — {step} 스텝", flush=True)
