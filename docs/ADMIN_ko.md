@@ -10,6 +10,7 @@
 bash run.sh check LINKS=<값>                 # 1–2분, 설치 없음
 bash run.sh teacher KIND=smoke LINKS=<값>    # 선생 점검을 작은 데이터로 끝까지 (학습 없음)
 bash run.sh teacher LINKS=<값>               # 선생 점검 (학습 없음)
+bash run.sh relcheck LINKS=<값>              # 상대 깊이 모델 점검 (학습 없음)
 bash run.sh smoke LINKS=<값>                 # 선생 라벨 → 학습 · 평가를 작은 데이터로 끝까지
 bash run.sh all LINKS=<값>                   # 본 실험 (선생 라벨 → 학습 · 평가, 18–19시간으로 어림)
 ```
@@ -23,8 +24,9 @@ bash run.sh all LINKS=<값>                   # 본 실험 (선생 라벨 → �
 
 | 대상 | 받는 곳 | 크기 |
 |---|---|---|
-| 학습 · 평가 데이터 묶음 (`smoke` · `all` 모드. 선생 점검 모드는 따로 2.8 GiB) | Google Drive (링크 공유 파일) | 21.6 GiB |
+| 학습 · 평가 데이터 묶음 (`smoke` · `all` 모드. 선생 점검 모드는 따로 2.8 GiB, 상대 깊이 모델 점검 모드는 `val.tar` · `ms2_rgb_val.tar` 2.1 GiB) | Google Drive (링크 공유 파일) | 21.6 GiB |
 | Depth Anything V2 ViT-L 가중치 | Hugging Face | 1.3 GB |
+| Depth Anything V2 ViT-S 가중치 (`relcheck` 모드만) | Hugging Face | 0.1 GB |
 | Depth Anything V2 코드 | GitHub (고정 커밋) | 수 MB |
 | UniDepthV2 ViT-L 가중치 (`teacher` 모드, 그리고 `smoke` · `all` 모드의 선생 라벨 단계) | Hugging Face | 1.4 GB |
 | UniDepth 코드 (위와 같은 때) | GitHub (고정 커밋) | 22 MB |

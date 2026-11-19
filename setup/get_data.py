@@ -8,7 +8,8 @@
 끝나면 PNG 개수를 확인하고 <dest>/.done 에 '<종류> <해시>' 를 남긴다 (다시 부르면 건너뜀). 받은 tar 는 풀고 나서 지운다.
 화면에 주소 · 파일 ID 를 찍지 않는다. 표준 라이브러리만 쓴다.
 
-사용: python3 setup/get_data.py --kind smoke|all|teacher|teacher_smoke --dest <폴더> --dl <받을 폴더> [--search /app/data …] [--links <Drive 파일 ID>]
+  --only <묶음 이름,…> 를 주면 종류와 상관없이 그 묶음들만 (상대 깊이 모델 점검: val.tar · ms2_rgb_val.tar).
+사용: python3 setup/get_data.py --kind smoke|all|teacher|teacher_smoke [--only <묶음 이름,…>] --dest <폴더> --dl <받을 폴더> [--search /app/data …] [--links <Drive 파일 ID>]
 """
 import argparse
 import hashlib
@@ -136,9 +137,14 @@ def main():
     ap.add_argument("--dl", required=True)
     ap.add_argument("--search", nargs="*", default=[])
     ap.add_argument("--links", default="")
+    ap.add_argument("--only", default="", help="묶음 이름 (쉼표) — 주면 --kind 대신 이것들만")
     a = ap.parse_args()
-    files = {k: v for k, v in SPEC["files"].items() if v["kind"] == a.kind}
-    tag = a.kind + " " + hashlib.sha256("".join(v["sha256"] for v in files.values()).encode()).hexdigest()[:16]
+    only = [x for x in a.only.split(",") if x]
+    if any(x not in SPEC["files"] for x in only):
+        print(f"!!! [data] 목록 (data.json) 에 없는 묶음: {', '.join(x for x in only if x not in SPEC['files'])}")
+        return 1
+    files = {k: SPEC["files"][k] for k in only} if only else {k: v for k, v in SPEC["files"].items() if v["kind"] == a.kind}
+    tag = ("only:" + ",".join(only) if only else a.kind) + " " + hashlib.sha256("".join(v["sha256"] for v in files.values()).encode()).hexdigest()[:16]
     done = os.path.join(a.dest, ".done")
     if os.path.exists(done) and open(done).read().strip() == tag:
         print("[data] 이미 풀려 있음 (같은 작업 안)")

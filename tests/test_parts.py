@@ -453,6 +453,24 @@ class Parts(unittest.TestCase):
             self.assertLessEqual(len(out), 46)
             self.assertTrue(all(len(x) < 400 for x in out))
 
+    def test_rel_check(self):
+        import rel_check as RC
+        pick, ok = RC.verdict({"vitl": {"rgb": 0.10, "rgb_low": 0.15, "thr": 0.16}, "vits": {"rgb": 0.10, "rgb_low": 0.18, "thr": 0.21}})   # 견주는 것은 같은 높이의 RGB
+        self.assertEqual((pick, ok), ("vitl", {"vitl": True, "vits": False}))
+        pick, ok = RC.verdict({"vitl": {"rgb_low": 0.15, "thr": 0.1701}, "vits": {"rgb_low": 0.18, "thr": 0.19}})
+        self.assertEqual(pick, "vits")                                   # 통과한 것 가운데 열화상 오차가 작은 쪽 (L 은 0.0201 차라 못 넘음)
+        self.assertEqual(RC.verdict({"vitl": {"rgb_low": 0.10, "thr": 0.30}})[0], None)
+        th = D.Thermal("val")                                            # 열화상 쪽은 학생과 같은 입력 · 같은 순서
+        self.assertEqual(len(th), 3)
+        torch.manual_seed(0)
+        teacher = self.M.build_teacher("vits").eval()
+        rows = RC.measure(teacher, th, torch.device("cpu"), 2, 0)
+        self.assertEqual([r[0] for r in rows], [0, 1, 2])
+        for sc in (0.5, 2.0):                                            # 크기를 바꿔 넣어도 정답 크기에서 잰다
+            r2 = RC.measure(teacher, th, torch.device("cpu"), 1, 0, sc)
+            self.assertEqual([r[0] for r in r2], [0, 1, 2])
+        self.assertTrue(all(0 <= r[1] < 10 and 0 <= r[2] <= 1 for r in rows))
+
     def test_unpack(self):
         import get_data as G
         with tempfile.TemporaryDirectory() as t:

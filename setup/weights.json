@@ -1,5 +1,5 @@
 {
- "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검과 팔 ours 의 라벨 뽑기에 쓴다). setup/get_weights.py 가 읽는다.",
+ "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검과 팔 ours 의 라벨 뽑기에 쓴다). setup/get_weights.py 가 읽는다. dav2_vits 는 2026-11-19 HF API 로 확인 — 상대 깊이 모델 점검 (run.sh relcheck) 과 열화상 판 TR2M 에 쓴다.",
  "dav2_vitl": {
   "repo": "depth-anything/Depth-Anything-V2-Large",
   "revision": "cbbb86a30ce19b5684b7a05155dc7e6cbc7685b9",
@@ -8,6 +8,17 @@
    "depth_anything_v2_vitl.pth": {
     "size": 1341395338,
     "sha256": "a7ea19fa0ed99244e67b624c72b8580b7e9553043245905be58796a608eb9345"
+   }
+  }
+ },
+ "dav2_vits": {
+  "repo": "depth-anything/Depth-Anything-V2-Small",
+  "revision": "03876f8651c73a60fe4c2c48294e09fcb6838fcf",
+  "license": "Apache-2.0",
+  "files": {
+   "depth_anything_v2_vits.pth": {
+    "size": 99218434,
+    "sha256": "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378"
    }
   }
  },

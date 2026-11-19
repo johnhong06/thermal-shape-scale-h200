@@ -8,6 +8,8 @@
 #                                         #   — 평가 데이터를 나중에 더했을 때 쓴다. SETS=<세트,…> 로 일부만
 #   bash run.sh teacher [LIMIT=N]         # 선생 점검 (학습 없음, README '선생 점검'): MS2 의 RGB 에서 두 선생 (Depth Anything V2 · UniDepthV2) 을 LiDAR 정답에 대 본다.
 #                                         #   KIND=smoke 면 16 장짜리 작은 묶음으로. 표와 판정이 화면 끝에 나온다
+#   bash run.sh relcheck                  # 상대 깊이 모델 점검 (학습 없음, README '열화상 판 TR2M' 단계 1): Depth Anything V2 상대 깊이 ViT-L · ViT-S 를 고정한 채
+#                                         #   MS2 val 의 RGB · 열화상에서 모양 오차를 잰다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh setup [DRY_RUN=1] | data  # 한 단계만 (작업끼리 파일이 안 이어지므로 data 는 setup 도 먼저 한다)
 # KEY=값 (이슈 한 줄 명령에는 환경 변수를 못 넣으므로 인자로):
 #   ARMS=base,sep,ours   돌릴 팔 (쉼표, 안 주면 이 셋). base = 기준선 · sep = 모양 + 스케일 학생을 MS2 만으로 ·
@@ -32,7 +34,7 @@ cd "$(dirname "$0")" || exit 1
 REPO=$PWD
 MODE=${1:-}
 [ $# -gt 0 ] && shift
-MODES="check setup data smoke all eval teacher"
+MODES="check setup data smoke all eval teacher relcheck"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
 KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
@@ -145,7 +147,7 @@ run_step() {  # 이름 로그 보이기(show|quiet) 명령… → 종료 코드 
     n=$(wc -l < "$log")
     if [ "$n" -gt "$seen" ]; then
       new=$(tail -n "+$((seen + 1))" "$log" | head -n $((n - seen))); seen=$n
-      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|판정|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
+      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|판정|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
     fi
     if [ $((t - lastshow)) -ge "$PROGRESS_SEC" ]; then echo "[$name] $(date +%H:%M) 진행 중 $((t / 60)) 분 · 로그 변화 없음 $((idle / 60)) 분"; lastshow=$t; fi
     if [ "$STOP" = 1 ]; then rc=130; break; fi
@@ -222,9 +224,13 @@ export_weights() {
   local m
   m=$("$SYSPY" -I -B setup/get_weights.py --dir dav2_vitl) || { echo "!!! [setup] 가중치가 캐시에 없음"; return 1; }
   export TD_DAV2=$m/depth_anything_v2_vitl.pth HF_HUB_OFFLINE=1
+  if [ "$MODE" = relcheck ] && [ "$ENC" = vitl ]; then
+    m=$("$SYSPY" -I -B setup/get_weights.py --dir dav2_vits) || { echo "!!! [setup] ViT-S 가중치가 캐시에 없음"; return 1; }
+    export TD_DAV2S=$m/depth_anything_v2_vits.pth
+  fi
 }
 setup_all() {
-  [ -f "$STATE/.ok_setup_${ENVNAME}_$DRY_RUN" ] && { setup_env >/dev/null; export_weights; return 0; }
+  [ -f "$STATE/.ok_setup_${ENVNAME}_$DRY_RUN" ] && { setup_env >/dev/null; export_weights || return 1; return 0; }
   setup_env || { echo "!!! [setup] 환경 실패 — logs/setup_env.log"; return 1; }
   run_step code "$LOGS/setup_code.log" show bash setup/fetch_code.sh "$TD_CODE" || return 1
   if [ $NEED_UD = 1 ]; then run_step code "$LOGS/setup_code.log" show bash setup/fetch_code.sh "$TD_UNIDEPTH" unidepth || return 1; fi
@@ -233,6 +239,7 @@ setup_all() {
     echo "[setup] DRY_RUN: 패키지 설치 · 가중치 받기는 건너뜀"; touch "$STATE/.ok_setup_${ENVNAME}_1"; return 0
   fi
   local only=dav2_vitl; [ $NEED_UD = 1 ] && [ "$ENC" = vitl ] && only=dav2_vitl,unidepth_v2_vitl
+  [ "$MODE" = relcheck ] && [ "$ENC" = vitl ] && only=dav2_vitl,dav2_vits   # 로컬 흐름 시험 (ENC=vits) 은 무작위 초기화라 받지 않는다
   run_step weights "$LOGS/setup_weights.log" show "$TPY" -I -B setup/get_weights.py --only "$only" || \
     run_step weights "$LOGS/setup_weights.log" show env HF_HUB_DISABLE_XET=1 "$TPY" -I -B setup/get_weights.py --only "$only" || return 1
   export_weights || return 1
@@ -298,7 +305,7 @@ os.replace(dst + ".tmp", dst)
 print(f"[zip] results.zip — 파일 {len(items)} 개 (체크포인트 {len(cks)}), {os.path.getsize(dst) / 2**20:.1f} MiB")
 PY
 }
-report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
+report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] && [ "$MODE" != relcheck ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
 fail() { echo "!!! [$MODE] $1"; report; zip_results; exit 1; }
 
 case "$MODE" in
@@ -327,6 +334,16 @@ case "$MODE" in
     off=(env); [ "$ENC" = vitl ] || off=(env -u HF_HUB_OFFLINE)   # 작은 인코더 (로컬 흐름 시험) 의 UniDepthV2 는 목록에 없어 그때 받는다
     run_step "선생 점검" "$LOGS/teacher.log" show "${off[@]}" "$TPY" -I -B -u src/teacher_check.py --data "$WORK/data_teacher" --out "$OUTJ/teacher" \
       --encoder "$ENC" --weights "$([ "$ENC" = vitl ] && echo "$TD_DAV2")" --limit "$LIMIT" --amp 0 || fail "선생 점검 실패"   # Depth Anything V2 는 fp32 로 (UniDepthV2 는 공식 infer 가 GPU 에서 fp16 혼합 정밀도로 돈다)
+    zip_results;;
+  relcheck)
+    setup_all || fail "준비 실패"
+    rk=val.tar,ms2_rgb_val.tar; [ "$KIND" = smoke ] && rk=smoke.tar,smoke_teacher.tar   # MS2 val 의 열화상 · RGB 묶음 (같은 폴더 구조라 한곳에 푼다)
+    s=(--search); [ -d "$APP/data" ] && s+=("$APP/data"); [ -n "$DATA_DIR" ] && s+=("$DATA_DIR")
+    WATCH="$WORK/dl/*.part" run_step data "$LOGS/data.log" show "$SYSPY" -I -B -u setup/get_data.py --kind all --only "$rk" --dest "$WORK/data_rel" --dl "$WORK/dl" \
+      ${LINKS:+--links "$LINKS"} "${s[@]}" || fail "데이터 실패"
+    if [ "$ENC" = vitl ]; then rm=(--models vitl,vits --weights_l "$TD_DAV2" --weights_s "$TD_DAV2S"); else rm=(--models vits); fi   # 로컬 흐름 시험은 작은 모델을 무작위 초기화로
+    run_step "상대 깊이 점검" "$LOGS/relcheck.log" show "$TPY" -I -B -u src/rel_check.py --data "$WORK/data_rel" --out "$OUTJ/relcheck" "${rm[@]}" \
+      --limit "$LIMIT" --bs "$BS" --workers "$WORKERS" || fail "상대 깊이 점검 실패"
     zip_results;;
   eval)
     src=$OUTROOT/$FROM/ckpt
