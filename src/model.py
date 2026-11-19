@@ -4,6 +4,8 @@
 출력 = Sigmoid × max_depth. 다른 것: max_depth = 80 m (MS2 · 선행 평가 상한), 입력 크기.
 입력 크기: 사진의 가로 · 세로를 14 의 배수로 반올림 (256×640 → 252×644, 512×640 → 518×644) — 학습 · 평가 · 다른 데이터 모두 같은 규칙이라 화소 축척이 유지된다.
 
+열화상 판 TR2M (TR — 팔 tr): 고정한 상대 깊이 모델 (Depth Anything V2 상대 깊이) 의 출력 D_r 에, 같은 모델의 마지막 층 패치 토큰을 받는 작은 모듈 (ScaleMap) 이
+  화소별 scale 맵 A 와 shift 맵 B 를 내서 깊이 = 1 / (A ⊙ D_r + B). 학습하는 것은 모듈뿐이다. README '열화상 판 TR2M'.
 모양 + 스케일 학생 (Sep — 팔 sep · ours): 같은 인코더 · 같은 DPT 헤드에서 마지막 Sigmoid 만 떼어 그 앞의 값 y 를 log 깊이 꼴로 읽고,
   모양 zn = y − (사진 안 y 의 중앙값), 스케일 s = 인코더 마지막 층의 대표 토큰 → 작은 MLP, 깊이 = exp (s + zn).
 """
@@ -72,6 +74,108 @@ class Sep(torch.nn.Module):
         return y, s
 
 
+class RCU(torch.nn.Module):
+    """잔차 합성곱 (DPT · TR2M 의 ResidualConvUnit, 정규화 없음): 활성 → 3×3 → 활성 → 3×3 + 건너뜀."""
+
+    def __init__(self, c):
+        super().__init__()
+        self.c1, self.c2 = torch.nn.Conv2d(c, c, 3, 1, 1), torch.nn.Conv2d(c, c, 3, 1, 1)
+
+    def forward(self, x):
+        return self.c2(F.relu(self.c1(F.relu(x)))) + x
+
+
+class ScaleMap(torch.nn.Module):
+    """TR2M 의 ScaleMapModel (공개 코드 scalemap_depth.py) 에서 텍스트 교차 어텐션만 뺀 것. 크기도 공개 코드의 기본값 그대로 (out 192 · features 128 · 머리 8).
+    패치 토큰 (B, ph · pw, dim) → 자기 어텐션 + MLP → 격자 → 1×1 · 전치 합성곱 ×2 · 3×3 → (잔차 합성곱 · 1×1 · ×2 업샘플) 두 번 → 헤드 둘 → 망 입력 크기의
+    scale 맵 · shift 맵 (B, 14 ph, 14 pw), 둘 다 coef · exp(·) 라 양수. 헤드의 마지막 두 층과 exp 는 fp32 로.
+    공개 코드와 다른 점 하나: 두 헤드의 마지막 1×1 합성곱을 0 으로 시작해 처음 맵이 모든 화소에서 coef (0.01) 가 되게 한다.
+    공개 코드의 초기화 그대로면 exp 앞의 값이 수백까지 퍼져 (ViT-L 토큰 크기에서 어림) 깊이가 0.001 m 나 80 m 쪽으로 몰리고 기울기가 사라진다 (2026-11-19 독립 검토)."""
+
+    def __init__(self, dim, heads=8, out_ch=192, feat=128, coef=0.01):
+        super().__init__()
+        self.coef = coef
+        self.ln1, self.ln2 = torch.nn.LayerNorm(dim), torch.nn.LayerNorm(dim)
+        self.attn = torch.nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.mlp = torch.nn.Sequential(torch.nn.Linear(dim, dim * 4), torch.nn.GELU(), torch.nn.Linear(dim * 4, dim))
+        self.proj = torch.nn.Conv2d(dim, out_ch, 1)
+        self.up = torch.nn.ConvTranspose2d(out_ch, out_ch, 2, 2)
+        self.rn = torch.nn.Conv2d(out_ch, feat, 3, 1, 1, bias=False)
+        self.rcu1, self.oc1 = RCU(feat), torch.nn.Conv2d(feat, feat, 1)
+        self.rcu2, self.oc2 = RCU(feat), torch.nn.Conv2d(feat, feat, 1)
+        self.s1, self.t1 = torch.nn.Conv2d(feat, feat // 2, 3, 1, 1), torch.nn.Conv2d(feat, feat // 2, 3, 1, 1)
+        tail = lambda: Fp32(torch.nn.Sequential(torch.nn.Conv2d(feat // 2, 32, 3, 1, 1), torch.nn.ReLU(True), torch.nn.Conv2d(32, 1, 1)))  # noqa: E731
+        self.s2, self.t2 = tail(), tail()
+        for m in self.modules():                                       # 공개 코드의 init_weights 와 같게 (합성곱 · 선형만, 전치 합성곱은 기본값)
+            if isinstance(m, torch.nn.Conv2d):
+                torch.nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+            elif isinstance(m, torch.nn.Linear):
+                torch.nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+        for t in (self.s2, self.t2):                                   # 처음 맵 = coef (위 설명)
+            torch.nn.init.zeros_(t.m[-1].weight)
+            torch.nn.init.zeros_(t.m[-1].bias)
+
+    def forward(self, tok, ph, pw):
+        h = self.ln1(tok)
+        x = tok + self.attn(h, h, h, need_weights=False)[0]
+        x = x + self.mlp(self.ln2(x))
+        x = x.transpose(1, 2).reshape(x.shape[0], x.shape[-1], ph, pw)
+        x = self.rn(self.up(self.proj(x)))
+        x = F.interpolate(self.oc1(self.rcu1(x)), scale_factor=2, mode="bilinear", align_corners=True)
+        x = F.interpolate(self.oc2(self.rcu2(x)), scale_factor=2, mode="bilinear", align_corners=True)
+        hw = (ph * 14, pw * 14)
+        a = self.s2(F.interpolate(self.s1(x), hw, mode="bilinear", align_corners=True))[:, 0]
+        b = self.t2(F.interpolate(self.t1(x), hw, mode="bilinear", align_corners=True))[:, 0]
+        return self.coef * torch.exp(a.float().clamp(-30.0, 30.0)), self.coef * torch.exp(b.float().clamp(-30.0, 30.0))
+
+
+class TR(torch.nn.Module):
+    """열화상 판 TR2M. rel = 고정한 상대 깊이 모델 (build_teacher 의 것). forward → (D_r, A, B), 모두 (B, 14 ph, 14 pw) float32.
+    고정한 쪽은 기울기 없이 돌리고 늘 eval 로 둔다. 영상 특징 = rel 의 마지막 층 패치 토큰 (정규화한 것) — 큰 모델을 한 번만 돌린다."""
+
+    def __init__(self, rel):
+        super().__init__()
+        self.rel = rel.eval().requires_grad_(False)
+        self.scalemap = ScaleMap(rel.pretrained.embed_dim)
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.rel.eval()
+        return self
+
+    def forward(self, x):
+        ph, pw = x.shape[-2] // 14, x.shape[-1] // 14
+        with torch.no_grad():
+            feats = self.rel.pretrained.get_intermediate_layers(x, self.rel.intermediate_layer_idx[self.rel.encoder], return_class_token=True)
+            dr = self.rel.depth_head(feats, ph, pw)[:, 0].float()      # 상대 깊이 (역깊이 꼴, ReLU)
+        a, b = self.scalemap(feats[-1][0], ph, pw)
+        return dr, a, b
+
+
+def tr_depth(dr, a, b):
+    """1 / (A ⊙ D_r + B). 자르지 않는다 — 자르면 끝에 붙은 화소의 기울기가 0 이 된다. a · b > 0 이고 D_r ≥ 0 이라 분모는 늘 양수다.
+    평가는 common.variants 가 0.001–80 m 로 자른다 (다른 팔과 같은 규칙)."""
+    return 1.0 / (a * dr + b).clamp(min=1e-8)
+
+
+def build_tr(encoder="vitl", weights=""):
+    """weights = 상대 깊이 체크포인트 (전부 싣는다). 비우면 무작위 초기화 (시험용)."""
+    return TR(build_teacher(encoder, weights))
+
+
+def predict_tr(model, x, out_hw, amp=False):
+    """TR: 정규화된 입력 → (깊이 (B, out_h, out_w), A, B, D_r (망 입력 크기), 망 입력 크기의 입력). 학습의 손실이 맵과 입력을 함께 쓴다."""
+    x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
+    with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
+        dr, a, b = model(x)
+    d = F.interpolate(tr_depth(dr, a, b)[:, None], out_hw, mode="bilinear", align_corners=True)[:, 0]
+    return d, a, b, dr, x
+
+
 def net_size(h, w):
     return max(14, round(h / 14) * 14), max(14, round(w / 14) * 14)
 
@@ -94,6 +198,8 @@ def predict(model, x, out_hw, amp=False):
     """정규화된 입력 (B, 3, H, W) → 깊이 (B, out_h, out_w) m, float32. 공식 평가처럼 bilinear · align_corners=True 로 정답 크기에 맞춘다."""
     if isinstance(model, Sep):
         return sep_depth(*predict_sep(model, x, out_hw, amp))
+    if isinstance(model, TR):
+        return predict_tr(model, x, out_hw, amp)[0]
     x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
     with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
         d = model(x)
@@ -106,12 +212,17 @@ def count_params(model):
     out = {"encoder_m": round(enc / 1e6, 2), "head_m": round(head / 1e6, 2)}
     if isinstance(model, Sep):
         out["scale_head_m"] = round(sum(p.numel() for p in model.scale_head.parameters()) / 1e6, 3)      # head_m 에 들어 있는 몫
+    out["trainable_m"] = round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6, 2)
     return out
 
 
 def load(encoder, ckpt):
-    """학습한 모델 (final.pt) 을 싣는다 — 스케일 헤드가 들어 있으면 Sep 구조로."""
+    """학습한 모델 (final.pt) 을 싣는다 — 스케일 헤드가 들어 있으면 Sep, 축척 맵 모듈이 들어 있으면 TR (고정한 상대 깊이 모델까지 체크포인트에 들어 있다)."""
     sd = torch.load(ckpt, map_location="cpu", weights_only=True)
+    if any(k.startswith("scalemap.") for k in sd):
+        m = build_tr(encoder)
+        m.load_state_dict(sd)
+        return m
     m = build(encoder)
     if any(k.startswith("scale_head.") for k in sd):
         m = Sep(m)

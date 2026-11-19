@@ -17,6 +17,8 @@
   ours  sep + 스텝마다 쌍 배치 하나 (KAIST · LLVIP · Freiburg · TartanRGBT). 쌍의 목표는 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이 (src/labels.py):
         모양 = 중앙값을 맞춘 log 깊이 차의 절대값을 큰 쪽 20 % 버리고 평균, 스케일 = |s − 선생의 스케일|. 학습 중에는 선생을 돌리지 않는다.
         쌍의 크기가 둘이라 (640×512 · 640×298) 한 배치는 한 크기끼리만 묶고, 어느 쪽을 뽑을지는 쌍 수에 비례한 확률로 정한다 (시드 · 스텝으로 정해짐).
+  tr    열화상 판 TR2M (model.TR) 을 MS2 만으로 — 고정한 상대 깊이 모델 위의 작은 모듈만 학습한다 (학습률 = base 의 헤드와 같은 lr × 10).
+        손실 = SiLog (base 와 같음) + 0.5 × 의사 정답 (common.tr_pseudo) + 0.01 × 맵 매끄러움 (common.edge_smooth, A · B 각각). README '열화상 판 TR2M'.
 
 결과 (--out): train_log.csv (50 스텝마다) · val_log.csv (epoch 마다) · done.json. 체크포인트 (--ckpt): last.pt (이어 하기용, 끝나면 지움) · final.pt (가중치만)
 """
@@ -34,10 +36,12 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metrics, eval_mask, seed_all, shape_scale, silog, ssi_trim, vivid_grid, write_json  # noqa: E402
+from common import (MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metrics, edge_smooth, eval_mask, seed_all, shape_scale, silog, ssi_trim,  # noqa: E402
+                    tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr")
+TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
 LABEL_GROUPS = (("kaist", "llvip", "tartan"), ("freiburg",))     # ours 의 쌍 — 크기가 같은 것끼리 (640×512 · 640×298)
@@ -115,12 +119,19 @@ def main():
     seed_all(a.seed)
     torch.backends.cudnn.benchmark = True                          # 입력 크기가 고정
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
-    sep = a.arm in SEP
-    model = M.build(a.encoder, a.weights)
-    model = (M.Sep(model) if sep else model).to(dev)
-    enc = [p for n, p in model.named_parameters() if "pretrained" in n]
-    head = [p for n, p in model.named_parameters() if "pretrained" not in n]
-    opt = torch.optim.AdamW([{"params": enc, "lr": a.lr}, {"params": head, "lr": a.lr * 10.0}], lr=a.lr, betas=(0.9, 0.999), weight_decay=0.01)
+    sep, tr = a.arm in SEP, a.arm == "tr"
+    if tr:                                                         # 고정한 상대 깊이 모델 + 작은 모듈 — 모듈만 학습한다
+        model = M.build_tr(a.encoder, a.weights).to(dev)
+        groups = [{"params": list(model.scalemap.parameters()), "lr": a.lr * 10.0}]
+    else:
+        model = M.build(a.encoder, a.weights)
+        model = (M.Sep(model) if sep else model).to(dev)
+        enc = [p for n, p in model.named_parameters() if "pretrained" in n]
+        head = [p for n, p in model.named_parameters() if "pretrained" not in n]
+        groups = [{"params": enc, "lr": a.lr}, {"params": head, "lr": a.lr * 10.0}]
+    for g in groups:
+        g["base_lr"] = g["lr"]
+    opt = torch.optim.AdamW(groups, lr=a.lr, betas=(0.9, 0.999), weight_decay=0.01)
     steps_ep = len(ds) // a.bs
     if steps_ep < 1:
         raise SystemExit(f"!!! [train {name}] 학습 사진 {len(ds)} 장이 배치 {a.bs} 보다 적음")
@@ -136,7 +147,7 @@ def main():
         print(f"[train {name}] 이어 하기: epoch {ep0} · step {step}", flush=True)
     p = M.count_params(model)
     print(f"[train {name}] {a.arm} · {a.encoder} · 시드 {a.seed} · train {len(ds):,} 장 · {a.epochs} epoch × {steps_ep} 스텝 (배치 {a.bs}) · "
-          f"파라미터 {p['encoder_m']} + {p['head_m']} M · amp {int(amp)}", flush=True)
+          f"파라미터 {p['encoder_m']} + {p['head_m']} M (학습 {p['trainable_m']} M) · amp {int(amp)}", flush=True)
 
     teacher = pds = grid = inside = check = None
     if a.arm in PAIRS:
@@ -181,14 +192,20 @@ def main():
         g = torch.Generator()
         g.manual_seed(a.seed * 1000 + ep)                          # 이어 해도 같은 순서
         loader = DataLoader(ds, batch_size=a.bs, shuffle=True, generator=g, num_workers=a.workers, drop_last=True, pin_memory=dev.type == "cuda")
-        t0, run, run_pl, run_sc, run_psc, n = time.time(), 0.0, 0.0, 0.0, 0.0, 0
+        t0, run, run_pl, run_sc, run_psc, n, n_tp = time.time(), 0.0, 0.0, 0.0, 0.0, 0, 0
         for x, gt, _ in loader:
             x, gt = x.to(dev, non_blocking=True), gt.to(dev, non_blocking=True)
             lr = a.lr * (1 - step / total) ** 0.9
-            opt.param_groups[0]["lr"], opt.param_groups[1]["lr"] = lr, lr * 10.0
+            for g in opt.param_groups:
+                g["lr"] = g["base_lr"] * (1 - step / total) ** 0.9
             ok = (gt >= MIN_DEPTH) & (gt <= MAX_DEPTH)
             sc = psc = None
-            if sep:
+            if tr:
+                pred, ma, mb, dr, xn = M.predict_tr(model, x, gt.shape[-2:], amp)
+                ltp, k = tr_pseudo(ma, mb, F.interpolate(dr[:, None], gt.shape[-2:], mode="bilinear", align_corners=True)[:, 0], gt, ok)
+                n_tp += k
+                loss = silog(pred, gt, ok) + TR_PSEUDO * ltp + TR_SMOOTH * (edge_smooth(ma, xn.float()) + edge_smooth(mb, xn.float()))
+            elif sep:
                 zn, s_hat = M.predict_sep(model, x, gt.shape[-2:], amp)
                 sh, sc, _ = shape_scale(zn, s_hat, torch.log(gt.clamp(min=MIN_DEPTH)), ok)
                 loss = sh + sc
@@ -224,7 +241,7 @@ def main():
             run_psc += psc.item() if psc is not None else 0.0
             n += 1
             if step % 50 == 0 or step == 1:
-                log.writerow([ep + 1, step, round(loss.item(), 5), round(lp.item(), 5) if lp is not None else "", f"{lr:.3g}", round(time.time() - t_start, 1),
+                log.writerow([ep + 1, step, round(loss.item(), 5), round(lp.item(), 5) if lp is not None else "", f"{opt.param_groups[0]['lr']:.3g}", round(time.time() - t_start, 1),
                               round(sc.item(), 5) if sc is not None else "", round(psc.item(), 5) if psc is not None else ""])
                 fh.flush()
         sec = time.time() - t0
@@ -236,6 +253,7 @@ def main():
         mem = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
         print(f"[train {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f}" + (f" (스케일 {run_sc / max(n, 1):.4f})" if sep else "")
               + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if has_pl else "") + (f" (스케일 {run_psc / max(n, 1):.4f})" if lits is not None else "")
+              + (f" · 의사 정답을 쓴 사진 {n_tp:,} / {n * a.bs:,}" if tr else "")
               + f" · val AbsRel {v['raw']['abs_rel']:.4f} RMSE {v['raw']['rmse']:.3f} δ1 {v['raw']['d1']:.4f} · "
               f"{sec / 60:.1f} 분 ({sec / max(n, 1):.2f} 초/스텝, 전체 {total} 스텝이면 약 {sec / max(n, 1) * total / 3600:.1f} 시간) · GPU 최대 {mem:.1f} GiB", flush=True)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": ep + 1, "rng": torch.get_rng_state()}, last + ".tmp")
@@ -245,7 +263,8 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.ckpt, "final.pt"))
     os.remove(last)
     write_json(os.path.join(a.out, "done.json"), {
-        "arm": a.arm, "structure": "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp), "images": len(ds), "steps": step,
+        "arm": a.arm, "structure": "tr" if tr else "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr,
+        "lr_groups": [g["base_lr"] for g in groups], "amp": int(amp), "images": len(ds), "steps": step,
         "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else
                  {"sets": LABEL_GROUPS, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight, "scale_weight": a.pl_scale_weight} if lds is not None else None,
         "minutes": round((time.time() - t_start) / 60, 1), "gpu_peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2) if dev.type == "cuda" else None,

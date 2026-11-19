@@ -162,6 +162,49 @@ def shape_scale(zn, s, logt, mask, trim=0.0, min_px=MIN_VALID):
     return shape / max(n, 1), scale / max(n, 1), n
 
 
+TP_THR = 0.99            # 열화상 판 TR2M 의 의사 정답: 상대 깊이를 정답에 맞춘 깊이의 δ1 이 이보다 큰 사진만 쓴다 (TR2M 공개 코드 SelfThresholdScaleLoss 의 값)
+
+
+def fit_inv(dr, gt, mask):
+    """사진마다 s · dr + t ≈ 1 / gt 를 마스크 화소에서 최소제곱으로 (MiDaS 의 compute_scale_and_shift 와 같은 닫힌 꼴). dr · gt · mask = (B, H, W) → (s, t) 각 (B,), double.
+    쓸 화소가 둘 미만이거나 dr 이 한 값뿐이면 그 사진은 (0, 0)."""
+    m, p = mask.double(), dr.double()
+    y = torch.where(mask, 1.0 / gt.double().clamp(min=MIN_DEPTH), torch.zeros_like(p))
+    a00, a01, a11 = (m * p * p).sum((1, 2)), (m * p).sum((1, 2)), m.sum((1, 2))
+    b0, b1 = (m * p * y).sum((1, 2)), (m * y).sum((1, 2))
+    det = a00 * a11 - a01 * a01
+    ok = det.abs() > 1e-12
+    s = torch.where(ok, (a11 * b0 - a01 * b1) / torch.where(ok, det, torch.ones_like(det)), torch.zeros_like(det))
+    t = torch.where(ok, (-a01 * b0 + a00 * b1) / torch.where(ok, det, torch.ones_like(det)), torch.zeros_like(det))
+    return s, t
+
+
+def tr_pseudo(a, b, dr, gt, mask, thr=TP_THR):
+    """TR2M 의 의사 정답 손실 (공개 코드 SelfThresholdScaleLoss 를 옮김). 사진마다 상대 깊이 dr 을 역깊이 정답에 맞추고 (s, t), 맞춘 깊이 1 / (s · dr + t) 가
+    정답 화소의 thr 넘게 δ1 (1.25 안) 에 들면 그 사진의 scale 맵 a · shift 맵 b 를 상수 s · t 쪽으로 (L1, 화소 평균). 정답이 드문 화소까지 맵을 가르치려는 것.
+    a · b = (B, h, w) 맵 · dr · gt · mask = (B, H, W) 정답 해상도. → (손실, 쓴 사진 수). 쓴 사진이 없으면 0 (기울기는 이어진다)."""
+    with torch.no_grad():
+        s, t = fit_inv(dr, gt, mask)
+        d = 1.0 / (s[:, None, None] * dr.double() + t[:, None, None]).clamp(min=1.0 / MAX_DEPTH)
+        r = d / gt.double().clamp(min=MIN_DEPTH)
+        good = ((r < 1.25) & (1.0 / r < 1.25) & mask).double().sum((1, 2)) / mask.double().sum((1, 2)).clamp(min=1.0)
+        use = (good > thr) & (s > 0)
+    if not bool(use.any()):
+        return (a.sum() + b.sum()) * 0.0, 0
+    loss = (a[use] - s[use, None, None].to(a.dtype)).abs().mean() + (b[use] - t[use, None, None].to(b.dtype)).abs().mean()
+    return loss, int(use.sum())
+
+
+def edge_smooth(m, img):
+    """경계를 아는 매끄러움 손실 — TR2M 공개 코드의 EdgeAwareSmoothLoss 와 같은 식 (맵을 평균으로 나누지 않는다). 맵 m (B, h, w) 의 이웃 차를
+    영상 img (B, C, h, w, 망에 넣는 정규화된 입력) 의 이웃 차가 큰 곳에서 덜 벌한다. 가로 · 세로 평균의 합."""
+    m = m[:, None]
+    gx, gy = (m[..., :, :-1] - m[..., :, 1:]).abs(), (m[..., :-1, :] - m[..., 1:, :]).abs()
+    ix = (img[..., :, :-1] - img[..., :, 1:]).abs().mean(1, keepdim=True)
+    iy = (img[..., :-1, :] - img[..., 1:, :]).abs().mean(1, keepdim=True)
+    return (gx * torch.exp(-ix)).mean() + (gy * torch.exp(-iy)).mean()
+
+
 def vivid_grid(h=512, w=640, hr=480, wr=640, z0=PL_Z0):
     """ViViD: 열화상 픽셀 (h × w) 마다 RGB 영상 (hr × wr) 에서 볼 자리 → (grid_sample 용 격자 (1, h, w, 2), RGB 화면 안인지 (h, w)).
     열화상 픽셀의 시선에 거리 z0 의 점을 놓고 X_rgb = R · X + T 로 옮겨 RGB 에 투영한다."""

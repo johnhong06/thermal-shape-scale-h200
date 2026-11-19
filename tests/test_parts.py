@@ -446,12 +446,77 @@ class Parts(unittest.TestCase):
             self.assertTrue(any("(앞선 작업)" in x for x in out))
             for s in range(3):
                 shutil.rmtree(os.path.join(t, "runs", f"pl_s{s}"))
+            with tempfile.TemporaryDirectory() as t2:              # 단계 2: base · tr 을 MS2 만으로 — val 의 마지막 세 epoch 으로 구조 점검
+                for arm, vals in (("base", (0.090, 0.080, 0.078, 0.082)), ("tr", (0.095, 0.086, 0.084, 0.085))):
+                    d = os.path.join(t2, "runs", f"{arm}_s0", "eval")
+                    os.makedirs(d)
+                    json.dump({k: met(0.075) for k in ("test_day", "test_night", "test_rainy")}, open(os.path.join(d, "metrics.json"), "w"))
+                    with open(os.path.join(t2, "runs", f"{arm}_s0", "val_log.csv"), "w") as f:
+                        f.write("epoch,loss,loss_pl,val_abs_rel,val_rmse,val_d1,val_n\n" + "".join(f"{i + 1},0.1,,{v},2.5,0.95,16\n" for i, v in enumerate(vals)))
+                out2, j2 = summ(t2)
+                self.assertAlmostEqual(j2["tr_structure"]["tr"], (0.086 + 0.084 + 0.085) / 3)
+                self.assertTrue(j2["tr_structure"]["ok"])                   # 0.0850 ≤ 0.0800 + 0.005
+                self.assertTrue(any(x.startswith("[판정] 구조 점검") and "통과" in x for x in out2))
+                self.assertFalse(any("raw AbsRel:" in x for x in out2))    # 처음 보는 대상을 재지 않았으면 그 줄은 없다
             for arm in ("base", "sep", "ours", "plv"):             # 팔 넷 × 시드 셋도 끝 50 줄 안에 든다 (zip · 끝 줄 포함)
                 for s in range(3):
                     run(t, arm, s, 0.075, base(0))
             out, _ = summ(t)
             self.assertLessEqual(len(out), 46)
             self.assertTrue(all(len(x) < 400 for x in out))
+
+    def test_tr_model(self):
+        M = self.M
+        torch.manual_seed(0)
+        tr = M.build_tr("vits")
+        names = {n for n, p in tr.named_parameters() if p.requires_grad}
+        self.assertTrue(names and all(n.startswith("scalemap.") for n in names))          # 학습하는 것은 모듈뿐
+        self.assertEqual(M.count_params(tr)["trainable_m"], round(sum(p.numel() for p in tr.scalemap.parameters()) / 1e6, 2))
+        tr.train()
+        self.assertFalse(tr.rel.training)                                                  # 고정한 쪽은 늘 eval
+        x = torch.randn(2, 3, 256, 640)
+        d, a, b, dr, xn = M.predict_tr(tr, x, (256, 640))
+        self.assertTrue(torch.equal(a, torch.full_like(a, 0.01)) and torch.equal(b, torch.full_like(b, 0.01)))   # 처음 맵은 모든 화소에서 0.01
+        self.assertEqual((tuple(d.shape), tuple(a.shape), tuple(b.shape), tuple(dr.shape), tuple(xn.shape)),
+                         ((2, 256, 640), (2, 252, 644), (2, 252, 644), (2, 252, 644), (2, 3, 252, 644)))
+        self.assertTrue(float(a.min()) > 0 and float(b.min()) > 0 and float(dr.min()) >= 0)
+        self.assertTrue(float(d.min()) > 0 and float(d.max()) <= 100.0 + 1e-3)                  # 1 / (0.01 · D_r + 0.01) ≤ 100 m, 자르지 않는다
+        self.assertTrue(torch.allclose(d, M.predict(tr, x, (256, 640))))
+        gt = torch.rand(2, 256, 640) * 40 + 2
+        C.silog(d, gt, gt > 0).backward()                                                  # 기울기는 모듈에만
+        self.assertTrue(all(p.grad is None for p in tr.rel.parameters()) and any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in tr.scalemap.parameters()))
+        self.assertTrue(float(tr.scalemap.s2.m[-1].bias.grad.abs()) > 0 and float(tr.scalemap.t2.m[-1].bias.grad.abs()) > 0)   # 0 으로 시작한 마지막 층에도 기울기
+        with tempfile.TemporaryDirectory() as t:                                           # 체크포인트 = 고정한 쪽까지 전부 → 평가가 스스로 TR 로 싣는다
+            torch.save(tr.state_dict(), os.path.join(t, "tr.pt"))
+            tr2 = M.load("vits", os.path.join(t, "tr.pt")).eval()
+            self.assertIsInstance(tr2, M.TR)
+            with torch.no_grad():
+                self.assertTrue(torch.allclose(M.predict(tr2, x, (256, 640)), M.predict(tr.eval(), x, (256, 640)), atol=1e-5))
+
+    def test_tr_losses(self):
+        g = torch.Generator().manual_seed(2)
+        dr = torch.rand(3, 20, 30, generator=g) * 4 + 0.5
+        s0, t0 = torch.tensor([0.02, 0.05, 0.01]), torch.tensor([0.01, 0.002, 0.03])
+        gt = 1.0 / (s0[:, None, None] * dr + t0[:, None, None])
+        m = torch.rand(3, 20, 30, generator=g) < 0.4
+        s, t = C.fit_inv(dr, gt, m)
+        self.assertTrue(torch.allclose(s.float(), s0, atol=1e-5) and torch.allclose(t.float(), t0, atol=1e-5))   # 정확히 맞는 경우를 되찾는다
+        a, b = torch.full((3, 10, 15), 0.03, requires_grad=True), torch.full((3, 10, 15), 0.01, requires_grad=True)
+        loss, k = C.tr_pseudo(a, b, dr, gt, m)
+        self.assertEqual(k, 3)
+        exp = float(((0.03 - s0).abs().mean() + (0.01 - t0).abs().mean()))
+        self.assertAlmostEqual(float(loss), exp, places=5)
+        loss.backward()
+        self.assertTrue(float(a.grad.abs().sum()) > 0)
+        noisy = gt * torch.exp(torch.randn(3, 20, 30, generator=g) * 0.5)                   # 상대 깊이와 정답이 잘 안 맞으면 (δ1 < 0.99) 쓰지 않는다
+        loss, k = C.tr_pseudo(a, b, dr, noisy, m)
+        self.assertEqual((k, float(loss)), (0, 0.0))
+        img = torch.randn(2, 3, 12, 16)
+        self.assertAlmostEqual(float(C.edge_smooth(torch.full((2, 12, 16), 0.3), img)), 0.0, places=6)   # 고른 맵은 0
+        ramp = torch.arange(16.0).expand(2, 12, 16) * 0.01
+        self.assertAlmostEqual(float(C.edge_smooth(ramp, torch.zeros(2, 3, 12, 16))), 0.01, places=6)   # TR2M 식: 평균으로 나누지 않는다 (가로 차의 평균 0.01 + 세로 0)
+        rough = torch.rand(2, 12, 16, generator=g) + 0.1
+        self.assertTrue(float(C.edge_smooth(rough, torch.zeros(2, 3, 12, 16))) > float(C.edge_smooth(rough, img * 10)))   # 영상의 경계에서는 덜 벌한다
 
     def test_rel_check(self):
         import rel_check as RC

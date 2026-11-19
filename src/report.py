@@ -1,11 +1,12 @@
 """결과 표와 판정 — runs/<팔>_s<시드>/eval/metrics.json 을 모아 화면 (이슈 댓글) 에서 바로 읽을 수 있는 표를 찍고 summary/ 에 남긴다.
 
   python src/report.py summary --runs <runs 폴더> --out <summary 폴더>
-화면에는 이름과 숫자만 찍는다 (공개). 줄 수를 46 줄 안으로 (시드 셋일 때 팔 셋 32 줄 · 넷 41 줄) — run.sh 가 화면의 끝 50 줄을 남기므로 마지막 표는 늘 보인다.
+화면에는 이름과 숫자만 찍는다 (공개). 줄 수를 46 줄 안으로 (시드 셋일 때 팔 셋 33 줄 · 넷 42 줄, val 표 한 줄 포함) — run.sh 가 화면의 끝 50 줄을 남기므로 마지막 표는 늘 보인다.
 팔이 다섯이면 50 줄이라 앞쪽 표가 끝 50 줄에서 밀려난다 — 그때는 작업을 나눠 돌린다 (판정 줄은 맨 끝이라 남는다).
 수치 = 시드 평균 ± 표준편차 (시드 2 개 이상, n − 1 로 나눔). 판정 기준은 README '판정 기준' · '본 실험 3' 과 같다 (결과를 보기 전에 고정한 것).
 """
 import argparse
+import csv
 import json
 import os
 import re
@@ -20,6 +21,7 @@ ZS = (("ViViD 밤", "vivid"), ("FIReStereo", "fire"), ("ViViD 실내", "vivid_in
 # 새 대상 둘은 앞선 값이 없어 같은 작업의 시드 범위를 쓰되, 학습과 같은 데이터인 MS2 의 바닥보다 좁게 잡지는 않는다 (세 시드의 범위가 우연히 아주 좁을 때를 막는다).
 NOISE_FLOOR = {"ms2": 0.0013, "vivid": 0.0066, "fire": 0.0256}
 CLAIM_MIN = 2             # '여러 곳' = 대상 넷 가운데 이만큼 이상에서 개선이고 나빠진 곳이 없을 때
+VAL_LAST, VAL_TOL = 3, 0.005   # 열화상 판 TR2M 단계 2 (구조 점검): MS2 val AbsRel 의 마지막 세 epoch 평균이 같은 작업의 base 값 + 0.005 이하
 
 
 def load(runs):
@@ -31,6 +33,12 @@ def load(runs):
             r = json.load(open(p, encoding="utf-8"))
             done = os.path.join(runs, d, "done.json")
             r["_min"] = json.load(open(done)).get("minutes") if os.path.exists(done) else None
+            vl = os.path.join(runs, d, "val_log.csv")
+            if os.path.exists(vl):
+                with open(vl, newline="") as f:                     # 이어 하기로 같은 epoch 이 두 번 적혔으면 나중 것만
+                    by_ep = {int(row["epoch"]): float(row["val_abs_rel"]) for row in csv.DictReader(f) if row.get("val_abs_rel")}
+                v = [by_ep[e] for e in sorted(by_ep)]
+                r["_val"] = sum(v[-VAL_LAST:]) / len(v[-VAL_LAST:]) if v else None
             out.setdefault(m.group(1), {})[int(m.group(2))] = r
     return out
 
@@ -81,7 +89,7 @@ def summary(runs, out):
         ref["base"] = f" ({spec['source']})"
     os.makedirs(out, exist_ok=True)
     L = []
-    order = ("base", "sep", "ours", "pl", "plv")
+    order = ("base", "sep", "ours", "tr", "pl", "plv")
     arms = [a for a in order if a in R] + sorted(a for a in R if a not in order)
     zs_names = " | ".join(n for n, _ in ZS)
     L.append("[표1] MS2 test (학습과 같은 데이터) · raw — AbsRel / RMSE / δ1, 시드 평균±표준편차")
@@ -104,7 +112,15 @@ def summary(runs, out):
             L.append(f"[표5] {a}_s{s} | {f(MS2)} | " + " | ".join(f"{f([k])} · {f([k], 'median')}" for _, k in ZS)
                      + f" | {f(['vivid_day'])} · {f(['fire/day'])} · {f(['fire/night'])} | {r.get('_min')}")
 
+    vlast = {a: [r.get("_val") for r in R[a].values() if r.get("_val") is not None] for a in arms}
+    if any(vlast.values()):
+        L.append(f"[표6] MS2 val AbsRel — 마지막 {VAL_LAST} epoch 평균 (시드 평균) | " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in vlast.items() if v))
     J = {}
+    if vlast.get("base") and vlast.get("tr"):                         # 단계 2 의 판정 — 같은 작업의 base 와 견준다 (앞선 작업의 base_ref 에는 val 이 없다)
+        b, t = sum(vlast["base"]) / len(vlast["base"]), sum(vlast["tr"]) / len(vlast["tr"])
+        J["tr_structure"] = {"tr": t, "base": b, "ok": t <= b + VAL_TOL}
+        L.append(f"[판정] 구조 점검 (열화상 판 TR2M 단계 2, MS2 val): tr {t:.4f} · base {b:.4f} + {VAL_TOL} = {b + VAL_TOL:.4f} → "
+                 + ("통과 — 단계 3 으로" if t <= b + VAL_TOL else "못 넘음"))
     if "base" in R:
         vals = lambda arm, sets: [v for v in (get(r, sets, "raw", "abs_rel") for r in R[arm].values()) if v is not None]  # noqa: E731
         ms2 = vals("base", MS2)
@@ -138,13 +154,17 @@ def summary(runs, out):
                 good, bad = good + (v == "개선"), bad + (v == "나빠짐")
                 J[a]["targets"][k] = {"d": d, "noise": nz, "verdict": v}
                 parts.append(f"{n} {d:+.4f} {v} (잡음 {nz:.4f})")
-            L.append(f"[판정] {a} − base raw AbsRel: " + " · ".join(parts))
+            if parts:
+                L.append(f"[판정] {a} − base raw AbsRel: " + " · ".join(parts))
             if not judged:
                 L.append(f"[판정] {a}: MS2 평균 {d_ms2:+.4f} — 시드가 하나라 판정하지 않음")
                 continue
             head = f"[판정] {a}: MS2 평균 {d_ms2:+.4f} (잡음 {nm:.4f}) {'유지' if keep else '나빠짐'}"
             if a == "sep":                                        # sep 의 기준은 MS2 유지뿐이다 (구조만 바꾼 줄)
                 L.append(head + " → " + ("구조를 바꿔도 MS2 점수 유지" if keep else "구조를 바꾸자 MS2 점수가 나빠짐"))
+                continue
+            if not J[a]["targets"]:                                   # 처음 보는 대상을 재지 않은 작업 (단계 2 — SETS 로 MS2 만)
+                L.append(head)
                 continue
             if len(J[a]["targets"]) < len(ZS):                    # base 의 값이 없는 대상이 있으면 (앞선 작업의 base 를 기준으로 쓸 때) '여러 곳' 은 말하지 않는다
                 L.append(head + f" · 개선 {good} 곳 · 나빠짐 {bad} 곳 → 대상 {len(ZS)} 곳 가운데 {len(J[a]['targets'])} 곳만 견줄 수 있어 '여러 곳' 은 판정하지 않음")
