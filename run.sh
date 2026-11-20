@@ -17,9 +17,10 @@
 #                      앞선 비교 팔도 그대로 돈다: pl = 쌍 (KAIST · LLVIP) 에 모양만 · plv = 같은 방식을 ViViD 낮 쌍으로.
 #                      tr = 열화상 판 TR2M 을 MS2 만으로 (고정한 공식 상대 깊이 모델 + 작은 모듈, README '열화상 판 TR2M')
 #                      rt = 같은 꼴인데 상대 깊이 모델을 먼저 MS2 열화상으로 학습해 고정한다 (src/train_rel.py → src/train.py, 두 단계)
-#                      ours 가 들어 있으면 학습 전에 선생 라벨을 한 번 뽑는다 (src/labels.py, 37,233 장) — 환경은 선생 점검의 것 (envs/teacher.txt) 을 쓴다
+#                      rtp = rt + 쌍 (1 단계에 선생의 모양, 2 단계에 선생의 절대 깊이) — 우리 방법 · mtd = base + 쌍의 선생 절대 깊이 (기존 방식의 비교). README '본 실험 4'
+#                      ours · rtp · mtd 가 들어 있으면 학습 전에 선생 라벨을 한 번 뽑는다 (src/labels.py, 37,233 장) — 환경은 선생 점검의 것 (envs/teacher.txt) 을 쓴다
 #   SETS=<세트,…>      평가할 세트 (all · smoke · eval 모드). 안 주면 전부. 단계 2 는 MS2 test 만 (처음 보는 대상은 설계에 쓰지 않으므로 보지 않는다)
-#   SEEDS=0,1,2   EPOCHS=10   BS=16   PAIR_BS=8 (pl · plv · ours 의 쌍 배치, ours 의 선생 라벨 단계도 한 번에 이만큼)   AMP=1 (bf16 혼합 정밀도, 0 = 끔)   LIMIT=0 (학습 장 수 제한)   WORKERS=8 (사진을 읽는 작업자 수)
+#   SEEDS=0,1,2   EPOCHS=10   BS=16   PAIR_BS=8 (pl · plv · ours · rtp · mtd 의 쌍 배치, 선생 라벨 단계도 한 번에 이만큼)   AMP=1 (bf16 혼합 정밀도, 0 = 끔)   LIMIT=0 (학습 장 수 제한)   WORKERS=8 (사진을 읽는 작업자 수)
 #   CKPT=none|keep|seed0|all   학습한 모델 (final.pt, 하나에 1.3 GB). none = 버림 (기본) · keep = 결과 폴더의 ckpt/ 에 남김 (results.zip 에는 안 넣음 — 나중에 eval 모드로 씀) ·
 #                              seed0 · all = results.zip 에 넣음
 #   STALL_MIN=40 (로그가 이만큼 그대로면 멈춘 것으로 보고 끔)   PROGRESS_SEC=1800   RETRY=2 (학습이 죽으면 last.pt 에서 다시)
@@ -57,7 +58,7 @@ chk FROM "$NAME"; [ -z "${SETS:-}" ] || [[ $SETS =~ ^[a-z_,]+$ ]] || { echo "!!!
 case ${KIND:-} in ""|smoke|all) ;; *) echo "!!! KIND = smoke | all"; exit 2;; esac
 [ "$MODE" != eval ] || [ -n "${FROM:-}" ] || { echo "!!! eval 모드에는 FROM=<앞선 작업 이름> 이 필요"; exit 2; }
 case ${DRY_RUN:-0} in 0) ;; 1) [ "$MODE" = setup ] || { echo "!!! DRY_RUN=1 은 setup 모드에만"; exit 2; };; *) echo "!!! DRY_RUN = 0 | 1"; exit 2;; esac
-_a=${ARMS:-}; for x in ${_a//,/ }; do case $x in base|pl|plv|sep|ours|tr|rt) ;; *) echo "!!! ARMS 의 '$x' — base | sep | ours | tr | rt | pl | plv"; exit 2;; esac; done
+_a=${ARMS:-}; for x in ${_a//,/ }; do case $x in base|pl|plv|sep|ours|tr|rt|rtp|mtd) ;; *) echo "!!! ARMS 의 '$x' — base | sep | ours | tr | rt | rtp | mtd | pl | plv"; exit 2;; esac; done
 if [ "$MODE" = smoke ]; then KIND=${KIND:-smoke}; SEEDS=${SEEDS:-0}; EPOCHS=${EPOCHS:-1}; fi
 KIND=${KIND:-all}; FROM=${FROM:-}; SETS=${SETS:-}
 ARMS=${ARMS:-base,sep,ours}; SEEDS=${SEEDS:-0,1,2}; EPOCHS=${EPOCHS:-10}; BS=${BS:-16}; PAIR_BS=${PAIR_BS:-8}; AMP=${AMP:-1}; LIMIT=${LIMIT:-0}; WORKERS=${WORKERS:-8}; ENC=${ENC:-vitl}
@@ -199,9 +200,9 @@ mkenv_body() {
   echo "$h" > "$E/.ok"
 }
 TPY=""
-# UniDepthV2 가 필요한가: 선생 점검, 그리고 팔 ours 를 학습하는 작업 (선생 라벨을 뽑는다). 그때는 학습 환경 + UniDepthV2 가 쓰는 꾸러미 (envs/teacher.txt, torch 판은 같다)
+# UniDepthV2 가 필요한가: 선생 점검, 그리고 팔 ours · rtp · mtd 를 학습하는 작업 (선생 라벨을 뽑는다). 그때는 학습 환경 + UniDepthV2 가 쓰는 꾸러미 (envs/teacher.txt, torch 판은 같다)
 NEED_UD=0; [ "$MODE" = teacher ] && NEED_UD=1
-case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*) NEED_UD=1;; esac
+case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*|smoke:*,rtp,*|all:*,rtp,*|smoke:*,mtd,*|all:*,mtd,*) NEED_UD=1;; esac   # 선생 라벨을 쓰는 팔
 ENVNAME=train; [ $NEED_UD = 1 ] && ENVNAME=teacher
 setup_env() {
   local E=$WORK/envs/$ENVNAME h rc a n0 L=$LOGS/setup_env.log
@@ -268,11 +269,12 @@ train_eval() {  # 팔 시드 — 끝난 것은 건너뜀 (같은 작업 안)
   mkdir -p "$rd" "$ck"
   local w=""; [ "$ENC" = vitl ] && w=$TD_DAV2
   if [ ! -f "$rd/done.json" ]; then
-    if [ "$arm" = rt ]; then                                      # 1 단계: 열화상용 상대 깊이 모델 → $ck/rel/rel.pt (2 단계가 끝날 때까지 둔다)
+    if [ "$arm" = rt ] || [ "$arm" = rtp ]; then                  # 1 단계: 열화상용 상대 깊이 모델 → $ck/rel/rel.pt (2 단계가 끝날 때까지 둔다)
+      local rp=(); [ "$arm" = rtp ] && rp=(--pairs --pair_bs "$PAIR_BS")   # rtp 는 1 단계에도 쌍 (선생의 모양)
       for ((a = 0; a <= RETRY; a++)); do
         [ -f "$ck/rel/rel.pt" ] && [ -f "$rd/rel/done.json" ] && break   # 이번 작업의 1 단계가 끝낸 것만 (작업 폴더에 남은 옛 rel.pt 는 쓰지 않는다)
         WATCH="$rd/rel/train_log.csv $rd/rel/val_log.csv" run_step "상대 깊이 학습 $name" "$LOGS/train_rel_$name.log" show "$TPY" -I -B -u src/train_rel.py --seed "$seed" \
-          --epochs "$EPOCHS" --bs "$BS" --amp "$AMP" --limit "$LIMIT" --workers "$WORKERS" --encoder "$ENC" --weights "$w" --out "$rd/rel" --ckpt "$ck/rel" --resume
+          --epochs "$EPOCHS" --bs "$BS" --amp "$AMP" --limit "$LIMIT" --workers "$WORKERS" --encoder "$ENC" --weights "$w" --out "$rd/rel" --ckpt "$ck/rel" "${rp[@]}" --resume
         [ "$STOP" = 1 ] && return 130
         [ -f "$rd/rel/fail.json" ] && return 1
       done
@@ -332,7 +334,7 @@ case "$MODE" in
   smoke|all)
     setup_all || fail "준비 실패"
     data_step || fail "데이터 실패"
-    if [ $NEED_UD = 1 ]; then                                     # 팔 ours 의 쌍 라벨: 선생을 쌍의 RGB 에 한 번 돌려 둔다 (학습 중에는 안 돌린다)
+    if [ $NEED_UD = 1 ]; then                                     # 팔 ours · rtp · mtd 의 쌍 라벨: 선생을 쌍의 RGB 에 한 번 돌려 둔다 (학습 중에는 안 돌린다)
       off=(env); [ "$ENC" = vitl ] || off=(env -u HF_HUB_OFFLINE)   # 작은 인코더 (로컬 흐름 시험) 의 UniDepthV2 는 목록에 없어 그때 받는다
       run_step "선생 라벨" "$LOGS/labels.log" show "${off[@]}" "$TPY" -I -B -u src/labels.py --encoder "$ENC" --bs "$PAIR_BS" --workers "$WORKERS" || fail "선생 라벨 실패"   # 한 번에 PAIR_BS 장 (로컬 시험은 1 — 메모리)
     fi

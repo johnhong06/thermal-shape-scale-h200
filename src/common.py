@@ -165,6 +165,13 @@ def shape_scale(zn, s, logt, mask, trim=0.0, min_px=MIN_VALID):
 TP_THR = 0.99            # 열화상 판 TR2M 의 의사 정답: 상대 깊이를 정답에 맞춘 깊이의 δ1 이 이보다 큰 사진만 쓴다 (TR2M 공개 코드 SelfThresholdScaleLoss 의 값)
 
 
+def silog_px(pred, gt, mask, min_px=100, lambd=0.5):
+    """silog 와 같은 식인데, 쓸 화소가 min_px 미만이면 0 (기울기는 이어진다). 쌍의 선생 라벨용 — 어두운 쌍에서는 쓸 화소가 거의 없을 수 있다."""
+    if int(mask.sum()) < min_px:
+        return pred.sum() * 0.0
+    return silog(pred, gt, mask, lambd)
+
+
 def ssi_disp(pred, gt, mask, trim=0.0, min_px=MIN_VALID):
     """상대 깊이 모델 학습의 손실 — 역깊이 꼴 예측 pred (B, H, W) 와 정답 gt (B, H, W, m) 의 역깊이 1 / gt 를 사진마다 (값 − 중앙값) / 평균 절대 편차 로
     맞춘 뒤의 절대 오차 평균 (MiDaS 의 스케일 · 기준점 무관 손실, ssi_trim 과 같은 맞춤). trim > 0 이면 큰 오차 그 비율을 버린다. 쓸 화소가 min_px 미만인 사진은 건너뛴다."""

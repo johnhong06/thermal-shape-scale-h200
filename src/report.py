@@ -95,7 +95,7 @@ def summary(runs, out):
         ref["base"] = f" ({spec['source']})"
     os.makedirs(out, exist_ok=True)
     L = []
-    order = ("base", "sep", "ours", "tr", "rt", "pl", "plv")
+    order = ("base", "sep", "ours", "tr", "rt", "rtp", "mtd", "pl", "plv")
     arms = [a for a in order if a in R] + sorted(a for a in R if a not in order)
     zs_names = " | ".join(n for n, _ in ZS)
     L.append("[표1] MS2 test (학습과 같은 데이터) · raw — AbsRel / RMSE / δ1, 시드 평균±표준편차")
@@ -120,9 +120,10 @@ def summary(runs, out):
 
     vlast = {a: [r.get("_val") for r in R[a].values() if r.get("_val") is not None] for a in arms}
     if any(vlast.values()):
-        rels = [r["_rel"] for a in arms for r in R[a].values() if r.get("_rel") is not None]
+        rels = {a: [r["_rel"] for r in R[a].values() if r.get("_rel") is not None] for a in arms}
+        rels = {a: v for a, v in rels.items() if v}
         L.append(f"[표6] MS2 val AbsRel — 마지막 {VAL_LAST} epoch 평균 (시드 평균) | " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in vlast.items() if v)
-                 + (f" | rt 의 상대 깊이 모델 (사진마다 맞춘 뒤) {sum(rels) / len(rels):.4f} (고정한 공식 모델 0.1267)" if rels else ""))
+                 + (" | 1 단계 상대 깊이 모델 (사진마다 맞춘 뒤, 고정한 공식 모델 0.1267) " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in rels.items()) if rels else ""))
     J = {}
     for arm in ("tr", "rt"):                                        # 구조 점검 — 같은 작업의 base 와 견준다 (앞선 작업의 base_ref 에는 val 이 없다)
         if vlast.get("base") and vlast.get(arm):
@@ -182,6 +183,15 @@ def summary(runs, out):
             J[a]["claim"] = claim
             L.append(head + f" · 개선 {good} 곳 · 나빠짐 {bad} 곳 → "
                      + (f"여러 곳에서 개선 (기준: MS2 유지 · 나빠진 곳 없음 · 개선 {CLAIM_MIN} 곳 이상)" if claim else "주장의 기준에 못 미침"))
+    if "rtp" in R and "mtd" in R:                                     # 본 실험 4 의 비교 (판정에는 넣지 않는다): 같은 쌍 · 같은 선생에서 나눈 구조 대 한꺼번에 내는 구조
+        mean = lambda arm, sets: (lambda v: sum(v) / len(v) if v else None)([x for x in (get(r, sets, "raw", "abs_rel") for r in R[arm].values()) if x is not None])  # noqa: E731
+        parts = []
+        for n, sets in [("MS2 평균", list(MS2))] + [(n, [k]) for n, k in ZS]:
+            x, y = mean("rtp", sets), mean("mtd", sets)
+            if x is not None and y is not None:
+                parts.append(f"{n} {x - y:+.4f}")
+        if parts:
+            L.append("[비교] rtp − mtd raw AbsRel (같은 쌍 · 같은 선생에서 방법 전체의 차, 판정에는 넣지 않음): " + " · ".join(parts))
     print("\n".join(L), flush=True)
     with open(os.path.join(out, "summary.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")

@@ -4,12 +4,15 @@ Depth Anything V2 상대 깊이 모델 (체크포인트 전부, model.build_rel)
 손실 = common.ssi_disp (사진마다 중앙값 · 평균 절대 편차로 맞춘 역깊이의 절대 오차, 정답 화소만). 나머지는 base 와 같다:
   AdamW (weight decay 0.01) · 학습률 인코더 lr · 헤드 lr × 10 · 스텝마다 (1 − 진행)^0.9 · 배치 · epoch · 좌우 뒤집기 증강 · bf16 · 시드 · 이어 하기.
 val 은 epoch 마다 재서 찍기만 한다: 사진마다 역깊이에서 a · x + b 를 정답에 맞춘 뒤의 AbsRel (상대 깊이 모델 점검과 같은 식 — 고정한 공식 모델은 0.1267 이었다).
+--pairs (팔 rtp): 스텝마다 쌍 배치 하나를 더 본다. 목표 = 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이, 같은 ssi_disp 에 큰 오차 20 % 버림 (PL_TRIM), 쓸 화소 = 라벨 0 초과 80 m 이하.
+  쌍은 train.py 의 ours · rtp · mtd 와 같다 (크기별 배치, 쌍 수에 비례한 뽑기). MS2 쪽 손실 · 스텝 수 · 학습률은 그대로이고 쌍 손실의 기울기를 더한다.
 
 결과 (--out): train_log.csv · val_log.csv · done.json. 체크포인트 (--ckpt): last.pt (이어 하기, 끝나면 지움) · rel.pt (가중치만 — train.py --arm rt --weights 로 넘긴다)
 """
 import argparse
 import csv
 import os
+import random
 import sys
 import time
 
@@ -20,7 +23,7 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import MAX_DEPTH, MIN_DEPTH, seed_all, ssi_disp, write_json  # noqa: E402
+from common import MAX_DEPTH, MIN_DEPTH, PL_TRIM, seed_all, ssi_disp, write_json  # noqa: E402
 from rel_check import measure  # noqa: E402
 
 
@@ -38,6 +41,9 @@ def main():
     ap.add_argument("--amp", type=int, default=1)
     ap.add_argument("--out", required=True)
     ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--pairs", action="store_true", help="쌍 + 선생 라벨을 더한다 (팔 rtp)")
+    ap.add_argument("--pair_bs", type=int, default=8)
+    ap.add_argument("--pl_weight", type=float, default=1.0)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
@@ -68,15 +74,30 @@ def main():
         step, ep0 = ck["step"], ck["epoch"]
         torch.set_rng_state(ck["rng"])
         print(f"[train-rel {name}] 이어 하기: epoch {ep0} · step {step}", flush=True)
+    lds = lits = None
+    if a.pairs:                                                    # 쌍 + 선생 라벨, 크기별로 따로 (train.py 와 같은 뽑기)
+        lds = [d for d in (D.PairLabels(g, a.limit) for g in D.LABEL_GROUPS) if len(d) >= a.pair_bs]
+        if not lds:
+            raise SystemExit(f"!!! [train-rel {name}] 쌍이 쌍 배치 {a.pair_bs} 보다 적음")
+
+        def pair_batches(d, salt):
+            k = 0
+            while True:
+                g = torch.Generator()
+                g.manual_seed(a.seed * 100003 + step * 31 + k + salt * 7)
+                yield from DataLoader(d, batch_size=a.pair_bs, shuffle=True, generator=g, num_workers=a.workers // 2, drop_last=True, pin_memory=dev.type == "cuda")
+                k += 1
+        lits = [pair_batches(d, i + 1) for i, d in enumerate(lds)]
     print(f"[train-rel {name}] 열화상용 상대 깊이 모델 · {a.encoder} · 시드 {a.seed} · train {len(ds):,} 장 · {a.epochs} epoch × {steps_ep} 스텝 (배치 {a.bs}) · "
-          f"{'공식 상대 깊이 체크포인트에서' if a.weights else '무작위 초기화 (흐름 시험)'} · amp {int(amp)}", flush=True)
+          f"{'공식 상대 깊이 체크포인트에서' if a.weights else '무작위 초기화 (흐름 시험)'} · amp {int(amp)}"
+          + (f" · 쌍 (선생 모양) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, 비중 {a.pl_weight})" if lds else ""), flush=True)
     new = not (a.resume and step > 0 and os.path.exists(os.path.join(a.out, "train_log.csv")))
     fh = open(os.path.join(a.out, "train_log.csv"), "w" if new else "a", newline="")
     vh = open(os.path.join(a.out, "val_log.csv"), "w" if new else "a", newline="")
     log, vlog = csv.writer(fh), csv.writer(vh)
     if new:
-        log.writerow(["epoch", "step", "loss", "lr", "sec"])
-        vlog.writerow(["epoch", "loss", "val_aligned_abs_rel", "val_aligned_d1", "val_n"])
+        log.writerow(["epoch", "step", "loss", "loss_pl", "lr", "sec"])
+        vlog.writerow(["epoch", "loss", "loss_pl", "val_aligned_abs_rel", "val_aligned_d1", "val_n"])
     t_start, v = time.time(), None
     for ep in range(ep0, a.epochs):
         model.train()
@@ -84,7 +105,7 @@ def main():
         g = torch.Generator()
         g.manual_seed(a.seed * 1000 + ep)                          # base 와 같은 순서
         loader = DataLoader(ds, batch_size=a.bs, shuffle=True, generator=g, num_workers=a.workers, drop_last=True, pin_memory=dev.type == "cuda")
-        t0, run, n, zero, tot = time.time(), 0.0, 0, 0, 0
+        t0, run, run_pl, n, zero, tot = time.time(), 0.0, 0.0, 0, 0, 0
         for x, gt, _ in loader:
             x, gt = x.to(dev, non_blocking=True), gt.to(dev, non_blocking=True)
             f = (1 - step / total) ** 0.9
@@ -100,21 +121,33 @@ def main():
                 return 3
             opt.zero_grad()
             loss.backward()
+            lp = None
+            if lits is not None:                                   # 쌍 배치는 따로 계산해 기울기만 더한다 (메모리는 한 배치만큼만)
+                gi = random.Random(a.seed * 1000003 + step).choices(range(len(lds)), weights=[len(d) for d in lds])[0]
+                xt, lab = (t.to(dev, non_blocking=True) for t in next(lits[gi]))
+                lp = a.pl_weight * ssi_disp(M.rel_forward(model, xt, lab.shape[-2:], amp), lab, (lab > 0) & (lab <= MAX_DEPTH), PL_TRIM, 100)
+                if not torch.isfinite(lp):
+                    write_json(os.path.join(a.out, "fail.json"), {"epoch": ep, "step": step, "why": "쌍 손실이 유한하지 않음"})
+                    print(f"!!! [train-rel {name}] epoch {ep + 1} step {step}: 쌍 손실이 유한하지 않음 — 멈춤", flush=True)
+                    return 3
+                lp.backward()
             opt.step()
             step += 1
             run += loss.item()
+            run_pl += lp.item() if lp is not None else 0.0
             n += 1
             if step % 50 == 0 or step == 1:
-                log.writerow([ep + 1, step, round(loss.item(), 5), f"{opt.param_groups[0]['lr']:.3g}", round(time.time() - t_start, 1)])
+                log.writerow([ep + 1, step, round(loss.item(), 5), round(lp.item(), 5) if lp is not None else "", f"{opt.param_groups[0]['lr']:.3g}", round(time.time() - t_start, 1)])
                 fh.flush()
         sec = time.time() - t0
         model.eval()
         rows = measure(model, vds, dev, a.bs * 2, min(a.workers, 4))
         v = (float(np.mean([r[1] for r in rows])), float(np.mean([r[2] for r in rows])), len(rows)) if rows else (float("nan"), float("nan"), 0)
-        vlog.writerow([ep + 1, round(run / max(n, 1), 5), round(v[0], 5), round(v[1], 5), v[2]])
+        vlog.writerow([ep + 1, round(run / max(n, 1), 5), round(run_pl / max(n, 1), 5) if lits is not None else "", round(v[0], 5), round(v[1], 5), v[2]])
         vh.flush()
         mem = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
-        print(f"[train-rel {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f} · 예측이 0 인 정답 화소 {zero / max(tot, 1) * 100:.2f} % · val (사진마다 맞춘 뒤) AbsRel {v[0]:.4f} δ1 {v[1]:.4f} · "
+        print(f"[train-rel {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f}" + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if lits is not None else "")
+              + f" · 예측이 0 인 정답 화소 {zero / max(tot, 1) * 100:.2f} % · val (사진마다 맞춘 뒤) AbsRel {v[0]:.4f} δ1 {v[1]:.4f} · "
               f"{sec / 60:.1f} 분 ({sec / max(n, 1):.2f} 초/스텝, 전체 {total} 스텝이면 약 {sec / max(n, 1) * total / 3600:.1f} 시간) · GPU 최대 {mem:.1f} GiB", flush=True)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": ep + 1, "rng": torch.get_rng_state()}, last + ".tmp")
         os.replace(last + ".tmp", last)
@@ -123,7 +156,7 @@ def main():
     torch.save(model.state_dict(), os.path.join(a.ckpt, "rel.pt.tmp"))
     os.replace(os.path.join(a.ckpt, "rel.pt.tmp"), os.path.join(a.ckpt, "rel.pt"))
     os.remove(last)
-    write_json(os.path.join(a.out, "done.json"), {"stage": "rel", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp),
+    write_json(os.path.join(a.out, "done.json"), {"stage": "rel", "pairs": [len(d) for d in lds] if lds else None, "pair_bs": a.pair_bs if lds else None, "pl_weight": a.pl_weight if lds else None, "pl_trim": PL_TRIM if lds else None, "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp),
                                                     "images": len(ds), "steps": step, "val_aligned_abs_rel": v[0] if v else None, "val_aligned_d1": v[1] if v else None,
                                                     "minutes": round((time.time() - t_start) / 60, 1)})
     print(f"[train-rel {name}] 끝 — {step} 스텝", flush=True)

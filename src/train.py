@@ -20,6 +20,9 @@
   tr    열화상 판 TR2M (model.TR) 을 MS2 만으로 — 고정한 상대 깊이 모델 위의 작은 모듈만 학습한다 (학습률 = base 의 헤드와 같은 lr × 10).
         손실 = SiLog (base 와 같음) + 0.5 × 의사 정답 (common.tr_pseudo) + 0.01 × 맵 매끄러움 (common.edge_smooth, A · B 각각). README '열화상 판 TR2M'.
   rt    tr 과 같은데, 고정하는 상대 깊이 모델이 공식 체크포인트가 아니라 먼저 MS2 열화상으로 미세조정한 것이다 (src/train_rel.py 가 만든 rel.pt 를 --weights 로).
+  rtp   rt + 쌍 (README '본 실험 4'): 1 단계 (train_rel.py --pairs) 에 선생의 모양, 2 단계 (여기) 에 선생의 절대 깊이 — 스텝마다 쌍 배치 하나에 SiLog.
+  mtd   base (한꺼번에 내는 구조, 전체 미세조정) + 쌍의 선생 절대 깊이에 SiLog. MonoTher-Depth 의 방식을 평가와 무관한 쌍으로 옮긴 비교 팔 (신뢰도 가중은 없음).
+        rtp · mtd 의 쌍은 ours 와 같다 (KAIST · LLVIP · Freiburg · TartanRGBT, 선생 = UniDepthV2, 크기별 배치 · 쌍 수에 비례한 뽑기). 쓸 화소 = 라벨 0 초과 80 m 이하.
 
 결과 (--out): train_log.csv (50 스텝마다) · val_log.csv (epoch 마다) · done.json. 체크포인트 (--ckpt): last.pt (이어 하기용, 끝나면 지움) · final.pt (가중치만)
 """
@@ -37,15 +40,16 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import (MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metrics, edge_smooth, eval_mask, seed_all, shape_scale, silog, ssi_trim,  # noqa: E402
+from common import (MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metrics, edge_smooth, eval_mask, seed_all, shape_scale, silog, silog_px, ssi_trim,  # noqa: E402
                     tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "mtd")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
-LABEL_GROUPS = (("kaist", "llvip", "tartan"), ("freiburg",))     # ours 의 쌍 — 크기가 같은 것끼리 (640×512 · 640×298)
+LABEL_GROUPS = D.LABEL_GROUPS                                      # 선생 라벨을 쓰는 팔 (ours · rtp · mtd) 의 쌍 — 크기가 같은 것끼리
+LABEL_ARMS = ("ours", "rtp", "mtd")
 
 
 def bright(rgb):
@@ -120,7 +124,7 @@ def main():
     seed_all(a.seed)
     torch.backends.cudnn.benchmark = True                          # 입력 크기가 고정
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
-    sep, tr = a.arm in SEP, a.arm in ("tr", "rt")
+    sep, tr = a.arm in SEP, a.arm in ("tr", "rt", "rtp")
     if tr:                                                         # 고정한 상대 깊이 모델 + 작은 모듈 — 모듈만 학습한다
         model = M.build_tr(a.encoder, a.weights).to(dev)
         groups = [{"params": list(model.scalemap.parameters()), "lr": a.lr * 10.0}]
@@ -172,12 +176,13 @@ def main():
             k += 1
     pit = pair_batches() if pds is not None else None
     lds = lits = None
-    if a.arm == "ours":                                            # 쌍 + 미리 뽑아 둔 선생 라벨, 크기별로 따로
+    if a.arm in LABEL_ARMS:                                        # 쌍 + 미리 뽑아 둔 선생 라벨, 크기별로 따로
         lds = [d for d in (D.PairLabels(g, a.limit) for g in LABEL_GROUPS) if len(d) >= a.pair_bs]
         if not lds:
             raise SystemExit(f"!!! [train {name}] 쌍이 쌍 배치 {a.pair_bs} 보다 적음")
         lits = [pair_batches(d, i + 1) for i, d in enumerate(lds)]
-        print(f"[train {name}] 쌍 (선생 라벨) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, 비중 모양 {a.pl_weight} · 스케일 {a.pl_scale_weight})", flush=True)
+        print(f"[train {name}] 쌍 (선생 라벨) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, "
+              + (f"비중 모양 {a.pl_weight} · 스케일 {a.pl_scale_weight})" if a.arm == "ours" else f"선생의 절대 깊이에 SiLog, 비중 {a.pl_weight})"), flush=True)
 
     new = not (a.resume and step > 0 and os.path.exists(os.path.join(a.out, "train_log.csv")))
     fh = open(os.path.join(a.out, "train_log.csv"), "w" if new else "a", newline="")
@@ -225,9 +230,12 @@ def main():
                 if lits is not None:
                     gi = random.Random(a.seed * 1000003 + step).choices(range(len(lds)), weights=[len(d) for d in lds])[0]   # 전체 스텝 < 1000003 이라 시드끼리 안 겹친다
                     xt, lab = (t.to(dev, non_blocking=True) for t in next(lits[gi]))
-                    zn, s_hat = M.predict_sep(model, xt, xt.shape[-2:], amp)
-                    psh, psc, _ = shape_scale(zn, s_hat, torch.log(lab.clamp(min=PL_MIN)), lab > 0, PL_TRIM, 100)
-                    lp = a.pl_weight * psh + a.pl_scale_weight * psc
+                    if a.arm == "ours":
+                        zn, s_hat = M.predict_sep(model, xt, xt.shape[-2:], amp)
+                        psh, psc, _ = shape_scale(zn, s_hat, torch.log(lab.clamp(min=PL_MIN)), lab > 0, PL_TRIM, 100)
+                        lp = a.pl_weight * psh + a.pl_scale_weight * psc
+                    else:                                          # rtp · mtd: 선생의 절대 깊이에 SiLog (MS2 와 같은 범위)
+                        lp = a.pl_weight * silog_px(M.predict(model, xt, xt.shape[-2:], amp), lab, (lab > 0) & (lab <= MAX_DEPTH))
                     if torch.isfinite(lp):
                         lp.backward()
             if not torch.isfinite(loss) or (lp is not None and not torch.isfinite(lp)):
@@ -253,7 +261,7 @@ def main():
         vh.flush()
         mem = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
         print(f"[train {name}] epoch {ep + 1}/{a.epochs} · loss {run / max(n, 1):.4f}" + (f" (스케일 {run_sc / max(n, 1):.4f})" if sep else "")
-              + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if has_pl else "") + (f" (스케일 {run_psc / max(n, 1):.4f})" if lits is not None else "")
+              + (f" · 쌍 손실 {run_pl / max(n, 1):.4f}" if has_pl else "") + (f" (스케일 {run_psc / max(n, 1):.4f})" if a.arm == "ours" else "")
               + (f" · 의사 정답을 쓴 사진 {n_tp:,} / {n * a.bs:,}" if tr else "")
               + f" · val AbsRel {v['raw']['abs_rel']:.4f} RMSE {v['raw']['rmse']:.3f} δ1 {v['raw']['d1']:.4f} · "
               f"{sec / 60:.1f} 분 ({sec / max(n, 1):.2f} 초/스텝, 전체 {total} 스텝이면 약 {sec / max(n, 1) * total / 3600:.1f} 시간) · GPU 최대 {mem:.1f} GiB", flush=True)
@@ -267,7 +275,8 @@ def main():
         "arm": a.arm, "structure": a.arm if tr else "sep" if sep else "joint", "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr,
         "lr_groups": [g["base_lr"] for g in groups], "amp": int(amp), "images": len(ds), "steps": step,
         "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else
-                 {"sets": LABEL_GROUPS, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight, "scale_weight": a.pl_scale_weight} if lds is not None else None,
+                 {"sets": LABEL_GROUPS, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight,
+                  **({"loss": "shape_scale", "scale_weight": a.pl_scale_weight} if a.arm == "ours" else {"loss": "silog"})} if lds is not None else None,
         "minutes": round((time.time() - t_start) / 60, 1), "gpu_peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2) if dev.type == "cuda" else None,
         "params": p})
     print(f"[train {name}] 끝 — {step} 스텝", flush=True)

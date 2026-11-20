@@ -35,7 +35,8 @@ VIVID = {"vivid": ("outdoor_robust_night1", "outdoor_robust_night2"), "vivid_day
          "vivid_in": ("indoor_robust_dark", "indoor_robust_varying", "indoor_aggresive_dark", "indoor_unstable_dark", "indoor_aggresive_local")}
 SETS = MS2_SETS + ("fire",) + tuple(VIVID) + ("sthereo",)
 PAIR_SETS = ("kaist", "llvip", "vivid_day", "freiburg", "tartan")
-LABEL_SETS = ("kaist", "llvip", "freiburg", "tartan")       # 팔 ours 가 쓰는 쌍 — 평가 대상 (ViViD) 의 것은 넣지 않는다
+LABEL_SETS = ("kaist", "llvip", "freiburg", "tartan")       # 팔 ours · rtp · mtd 가 쓰는 쌍 — 평가 대상 (ViViD) 의 것은 넣지 않는다
+LABEL_GROUPS = (("kaist", "llvip", "tartan"), ("freiburg",))     # 같은 배치에 묶는 쌍 — 크기가 같은 것끼리 (640×512 · 640×298)
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)[:, None, None]
 STD = np.array([0.229, 0.224, 0.225], np.float32)[:, None, None]
 

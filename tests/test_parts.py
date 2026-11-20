@@ -3,6 +3,7 @@
   TD_CODE=<공식 코드 폴더> <파이썬> -I -B tests/test_parts.py
 TD_CODE 는 setup/fetch_code.sh 가 받은 폴더 (tests/run_local.sh 가 준비한다). 모델은 무작위 초기화한 vits 를 쓴다 (가중치를 받지 않음).
 """
+import csv
 import io
 import json
 import os
@@ -467,13 +468,30 @@ class Parts(unittest.TestCase):
                 out3, j3 = summ(t2)
                 self.assertAlmostEqual(j3["rt_structure"]["rt"], 0.095)
                 self.assertFalse(j3["rt_structure"]["ok"])                   # 0.095 > 0.0800 + 0.005
-                self.assertTrue(any("rt 의 상대 깊이 모델 (사진마다 맞춘 뒤) 0.0710" in x for x in out3))
+                self.assertTrue(any("1 단계 상대 깊이 모델 (사진마다 맞춘 뒤, 고정한 공식 모델 0.1267) rt 0.0710" in x for x in out3))
             for arm in ("base", "sep", "ours", "plv"):             # 팔 넷 × 시드 셋도 끝 50 줄 안에 든다 (zip · 끝 줄 포함)
                 for s in range(3):
                     run(t, arm, s, 0.075, base(0))
             out, _ = summ(t)
             self.assertLessEqual(len(out), 46)
             self.assertTrue(all(len(x) < 400 for x in out))
+        with tempfile.TemporaryDirectory() as t:                   # 본 실험 4: 작업 하나 = 팔 넷 × 시드 하나 → 판정 안 함 · 비교 줄
+            arms4 = {"base": (0.075, 0.0), "rt": (0.0755, 0.0), "rtp": (0.0755, -0.03), "mtd": (0.076, -0.005)}
+            for arm, (ms2, dz) in arms4.items():
+                run(t, arm, 0, ms2, {k: v + dz for k, v in base(0).items()})
+            out, j = summ(t)
+            self.assertLessEqual(len(out), 46)
+            self.assertTrue(all(len(x) < 400 for x in out))
+            self.assertEqual([x.split()[1] for x in out if x.startswith("[표2] ") and "|" in x and not x.startswith("[표2] 처음")], ["base", "rt", "rtp", "mtd"])
+            self.assertEqual(j["rtp"]["targets"]["vivid"]["verdict"], "판정 안 함")
+            cmp_ = [x for x in out if x.startswith("[비교] rtp − mtd")]
+            self.assertTrue(len(cmp_) == 1 and "MS2 평균 -0.0005" in cmp_[0] and "ViViD 밤 -0.0250" in cmp_[0], cmp_)
+            for s in (1, 2):                                       # 세 작업을 한데 모으면 (시드 0 · 1 · 2) 본 실험 3 의 기준으로 판정된다
+                for arm, (ms2, dz) in arms4.items():
+                    run(t, arm, s, ms2 + 0.001 * s, {k: v + dz for k, v in base(s).items()})
+            out, j = summ(t)
+            self.assertTrue(j["rtp"]["claim"] and not j["mtd"]["claim"])     # rtp: 넷 모두 −0.03 (FIRe 의 잡음 0.0256 보다 큼) · mtd: −0.005 는 STheReO (잡음 0.004) 만
+            self.assertEqual([j["mtd"]["targets"][k]["verdict"] for k in ("vivid", "fire", "vivid_in", "sthereo")], ["차이 없음", "차이 없음", "차이 없음", "개선"])
 
     def test_tr_model(self):
         M = self.M
@@ -563,6 +581,33 @@ class Parts(unittest.TestCase):
                 self.assertEqual(len(f.read().strip().splitlines()), 3)
             tr = M.build_tr("vits", os.path.join(t, "ck", "rel.pt"))
             self.assertTrue(all(torch.equal(tr.rel.state_dict()[k], v) for k, v in torch.load(os.path.join(t, "ck", "rel.pt"), weights_only=True).items()))
+
+    def test_pair_arms(self):
+        g = torch.Generator().manual_seed(4)
+        pred = torch.rand(2, 8, 10, generator=g) * 30 + 1
+        lab = pred * 1.7                                                       # 배율만 다르면 SiLog (λ 0.5) 는 0 이 아니다 — 절대 깊이를 가르친다
+        m = torch.ones(2, 8, 10, dtype=torch.bool)
+        self.assertGreater(float(C.silog_px(pred, lab, m, min_px=10)), 0.1)
+        self.assertAlmostEqual(float(C.silog_px(pred, pred, m, min_px=10)), 0.0, places=5)
+        p = pred.clone().requires_grad_(True)
+        z = C.silog_px(p, lab, torch.zeros_like(m))                           # 쓸 화소가 모자라면 0, 기울기는 이어진다
+        z.backward()
+        self.assertEqual(float(z), 0.0)
+        self.assertEqual(D.LABEL_GROUPS, (("kaist", "llvip", "tartan"), ("freiburg",)))
+        import train_rel                                                       # 1 단계에 쌍 (rtp): 가짜 묶음의 쌍 라벨로 끝까지
+        with tempfile.TemporaryDirectory() as t:
+            argv = sys.argv
+            sys.argv = ["train_rel", "--encoder", "vits", "--epochs", "1", "--bs", "2", "--workers", "0", "--amp", "0", "--device", "cpu",
+                        "--pairs", "--pair_bs", "1", "--out", os.path.join(t, "rtp_s0", "rel"), "--ckpt", os.path.join(t, "ck")]
+            try:
+                self.assertEqual(train_rel.main(), 0)
+            finally:
+                sys.argv = argv
+            done = json.load(open(os.path.join(t, "rtp_s0", "rel", "done.json")))
+            self.assertEqual(done["pairs"], [4, 1])                                    # 640×512 넷 (kaist 둘 · llvip · tartan) · 640×298 하나 (freiburg)
+            with open(os.path.join(t, "rtp_s0", "rel", "train_log.csv")) as f:
+                rows = list(csv.DictReader(f))
+            self.assertTrue(rows and rows[0]["loss_pl"] != "")
 
     def test_rel_check(self):
         import rel_check as RC
