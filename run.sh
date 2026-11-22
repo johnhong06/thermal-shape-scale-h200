@@ -151,7 +151,7 @@ run_step() {  # 이름 로그 보이기(show|quiet) 명령… → 종료 코드 
     n=$(wc -l < "$log")
     if [ "$n" -gt "$seen" ]; then
       new=$(tail -n "+$((seen + 1))" "$log" | head -n $((n - seen))); seen=$n
-      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|판정|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
+      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|판정|비교|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
     fi
     if [ $((t - lastshow)) -ge "$PROGRESS_SEC" ]; then echo "[$name] $(date +%H:%M) 진행 중 $((t / 60)) 분 · 로그 변화 없음 $((idle / 60)) 분"; lastshow=$t; fi
     if [ "$STOP" = 1 ]; then rc=130; break; fi
