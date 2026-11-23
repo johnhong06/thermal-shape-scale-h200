@@ -719,7 +719,10 @@ class Parts(unittest.TestCase):
             with torch.no_grad():
                 self.assertEqual(tuple(M.predict(m3, x, (126, 154)).shape), (2, 126, 154))
         import train as T
-        self.assertEqual(T.CAM_ARMS, {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True)})
+        self.assertEqual(T.CAM_ARMS, {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True), "rtj": (True, True)})
+        xr, rx, ry = M.rescale(torch.zeros(2, 3, 256, 640), C.JITTER[-1])                            # 입력만 바꾸는 쪽 (1 단계도 쓴다)
+        self.assertEqual((tuple(xr.shape), rx, ry), ((2, 3, 364, 910), 910 / 640, 364 / 256))
+        self.assertEqual(M.rescale(xr, 1.0), (xr, 1.0, 1.0))
         self.assertTrue(all(a in T.ARMS and a not in T.LABEL_ARMS for a in T.CAM_ARMS))
         xj, cj = T.jitter(torch.zeros(2, 3, 256, 640), ms2[None].expand(2, 4), C.JITTER[0])
         self.assertEqual(tuple(xj.shape), (2, 3, 182, 448))                                          # 망에 들어갈 크기 (14 의 배수) 로 바로

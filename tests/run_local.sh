@@ -20,6 +20,7 @@ CAP=(systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 nice -n 19
 mkdir -p "$W"
 bash setup/fetch_code.sh "$W/code/Depth-Anything-V2"
 TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWarning tests/test_parts.py
+TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWarning tests/test_rel_jitter.py   # 1 단계의 크기 바꾸기 — 작은 영상으로, 따로 띄운 프로세스에서 (메모리)
 rm -rf "$W/output/smoke_local"
 "${CAP[@]}" bash run.sh smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits CKPT=keep JOB=smoke_local
 # 남긴 모델로 평가만 다시 (eval 모드) — 일부 세트만

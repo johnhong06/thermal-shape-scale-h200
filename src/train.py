@@ -26,6 +26,7 @@
         쌍은 카메라 값을 아는 셋 (KAIST · Freiburg · TartanRGBT), 라벨은 선생에게 그 카메라 값을 주고 뽑은 것 (labels.py --cam).
         rtn = 카메라 정보 없이 · rtf = 깊이를 기준 초점의 것으로 환산해 배움 (common.canon_scale) + 크기 바꾸기 증강 (common.JITTER, 카메라 값도 같이) ·
         rtk = rtf + 모듈 입력에 시선 방향 임베딩 (model.ray_tokens). 증강의 배율은 스텝 · 시드로 정해지고 MS2 배치와 쌍 배치가 따로 뽑는다.
+        rtj = rtk 와 같다 (여기 2 단계는 똑같다). 다른 것은 1 단계: 상대 깊이 모델도 같은 크기 바꾸기 증강으로 학습한 것을 쓴다 (train_rel.py --jitter, README '카메라 정보' 의 조정).
   mtd   base (한꺼번에 내는 구조, 전체 미세조정) + 쌍의 선생 절대 깊이에 SiLog. MonoTher-Depth 의 방식을 평가와 무관한 쌍으로 옮긴 비교 팔 (신뢰도 가중은 없음).
         rtp · mtd 의 쌍은 ours 와 같다 (KAIST · LLVIP · Freiburg · TartanRGBT, 선생 = UniDepthV2, 크기별 배치 · 쌍 수에 비례한 뽑기). 쓸 화소 = 라벨 0 초과 80 m 이하.
 
@@ -49,23 +50,19 @@ from common import (CAMS, JITTER, MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM
                     seed_all, shape_scale, silog, silog_px, ssi_trim, tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "mtd")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "mtd")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
 LABEL_GROUPS = D.LABEL_GROUPS                                      # 선생 라벨을 쓰는 팔 (ours · rtp · mtd) 의 쌍 — 크기가 같은 것끼리
 LABEL_ARMS = ("ours", "rtp", "mtd")
-CAM_ARMS = {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True)}   # 카메라 정보 실험의 팔 → (기준 초점으로 환산 + 크기 바꾸기 증강, 시선 방향 임베딩)
+CAM_ARMS = {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True), "rtj": (True, True)}   # 카메라 정보 실험의 팔 → (기준 초점으로 환산 + 크기 바꾸기 증강, 시선 방향 임베딩)
 
 
 def jitter(x, cam, r):
-    """크기 바꾸기 증강: 입력 (B, 3, H, W) 을 r 배로 바꾸고 카메라 값 (B, 4) 도 같이 바꾼다. 정답 · 라벨은 건드리지 않는다 (예측을 그 크기로 올려 견준다).
-    망에 들어갈 크기 (14 의 배수) 로 바로 바꾼다 — 한 번만 다시 찍히게 (r = 1 은 평가와 같이 그대로 두고 predict_tr 이 맞춘다)."""
-    if r == 1.0:
-        return x, cam
-    h, w = x.shape[-2:]
-    h2, w2 = M.net_size(round(h * r), round(w * r))
-    return F.interpolate(x, (h2, w2), mode="bilinear", align_corners=False, antialias=h2 < h), cam_resize(cam, w2 / w, h2 / h)
+    """크기 바꾸기 증강 (model.rescale): 입력 (B, 3, H, W) 을 r 배로 바꾸고 카메라 값 (B, 4) 도 같이 바꾼다."""
+    x, rx, ry = M.rescale(x, r)
+    return x, (cam if r == 1.0 else cam_resize(cam, rx, ry))
 
 
 def bright(rgb):

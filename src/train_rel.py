@@ -7,6 +7,9 @@ val 은 epoch 마다 재서 찍기만 한다: 사진마다 역깊이에서 a · 
 --pairs (팔 rtp · rts): 스텝마다 쌍 배치 하나를 더 본다. 목표 = 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이, 같은 ssi_disp 에 큰 오차 20 % 버림 (PL_TRIM), 쓸 화소 = 라벨 0 초과 80 m 이하.
   쌍은 train.py 의 ours · rtp · mtd 와 같다 (크기별 배치, 쌍 수에 비례한 뽑기). MS2 쪽 손실 · 스텝 수 · 학습률은 그대로이고 쌍 손실의 기울기를 더한다.
 
+--jitter (팔 rtj): MS2 배치의 입력 크기를 스텝마다 바꾼다 (model.rescale, 배율은 common.JITTER). 손실이 스케일 · 기준점과 무관해 카메라 값은 필요 없다.
+  2 단계의 크기 바꾸기가 이 모델에 처음 보는 크기를 넣던 것을 없애려는 것 (README '카메라 정보' 의 조정). 큰 배율 (1.2 초과) 은 배치를 둘로 나눠 계산한다 — 메모리 때문이고 기울기는 같다.
+
 결과 (--out): train_log.csv · val_log.csv · done.json. 체크포인트 (--ckpt): last.pt (이어 하기, 끝나면 지움) · rel.pt (가중치만 — train.py --arm rt --weights 로 넘긴다)
 """
 import argparse
@@ -23,7 +26,7 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import MAX_DEPTH, MIN_DEPTH, PL_TRIM, seed_all, ssi_disp, write_json  # noqa: E402
+from common import JITTER, MAX_DEPTH, MIN_DEPTH, PL_TRIM, seed_all, ssi_disp, write_json  # noqa: E402
 from rel_check import measure  # noqa: E402
 
 
@@ -44,6 +47,7 @@ def main():
     ap.add_argument("--pairs", action="store_true", help="쌍 + 선생 라벨을 더한다 (팔 rtp · rts)")
     ap.add_argument("--pair_bs", type=int, default=8)
     ap.add_argument("--pl_weight", type=float, default=1.0)
+    ap.add_argument("--jitter", default="", help="크기 바꾸기 증강의 배율들 (쉼표, default = common.JITTER). 비우면 끔 — 팔 rtj 의 1 단계")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
@@ -52,9 +56,10 @@ def main():
     name = os.path.basename(os.path.dirname(os.path.normpath(a.out)))
     dev = torch.device(a.device)
     amp = bool(a.amp) and dev.type == "cuda"
+    jit = JITTER if a.jitter == "default" else tuple(float(v) for v in a.jitter.split(",") if v)
 
     seed_all(a.seed)
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = not jit                       # 입력 크기가 고정일 때만
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
     vds = D.Thermal("val", a.val_limit)
     model = M.build_rel(a.encoder, a.weights).to(dev)
@@ -89,7 +94,7 @@ def main():
                 k += 1
         lits = [pair_batches(d, i + 1) for i, d in enumerate(lds)]
     print(f"[train-rel {name}] 열화상용 상대 깊이 모델 · {a.encoder} · 시드 {a.seed} · train {len(ds):,} 장 · {a.epochs} epoch × {steps_ep} 스텝 (배치 {a.bs}) · "
-          f"{'공식 상대 깊이 체크포인트에서' if a.weights else '무작위 초기화 (흐름 시험)'} · amp {int(amp)}"
+          f"{'공식 상대 깊이 체크포인트에서' if a.weights else '무작위 초기화 (흐름 시험)'} · amp {int(amp)}" + (f" · 크기 바꾸기 {min(jit):.2f}–{max(jit):.2f}" if jit else "")
           + (f" · 쌍 (선생 모양) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, 비중 {a.pl_weight})" if lds else ""), flush=True)
     new = not (a.resume and step > 0 and os.path.exists(os.path.join(a.out, "train_log.csv")))
     fh = open(os.path.join(a.out, "train_log.csv"), "w" if new else "a", newline="")
@@ -111,16 +116,22 @@ def main():
             f = (1 - step / total) ** 0.9
             opt.param_groups[0]["lr"], opt.param_groups[1]["lr"] = a.lr * f, a.lr * 10.0 * f
             ok = (gt >= MIN_DEPTH) & (gt <= MAX_DEPTH)
-            pred = M.rel_forward(model, x, gt.shape[-2:], amp)
-            loss = ssi_disp(pred, gt, ok)
-            zero += int(((pred <= 0) & ok).sum())                       # ReLU 에 막혀 0 이 된 정답 화소 (기울기가 없다)
-            tot += int(ok.sum())
-            if not torch.isfinite(loss):
-                write_json(os.path.join(a.out, "fail.json"), {"epoch": ep, "step": step, "why": "loss 가 유한하지 않음"})
-                print(f"!!! [train-rel {name}] epoch {ep + 1} step {step}: loss 가 유한하지 않음 — 멈춤", flush=True)
-                return 3
+            r = random.Random((a.seed * 1000003 + step) * 4 + 3).choice(jit) if jit else 1.0
+            x = M.rescale(x, r)[0]
+            parts = 2 if r > 1.2 and len(x) > 1 else 1                  # 큰 배율은 배치를 둘로 나눠 계산한다 (ViT 전체에 기울기가 흘러 메모리가 토큰 수보다 빨리 는다)
             opt.zero_grad()
-            loss.backward()
+            loss = None
+            for xs, gs, oks in zip(x.chunk(parts), gt.chunk(parts), ok.chunk(parts)):
+                pred = M.rel_forward(model, xs, gs.shape[-2:], amp)
+                part = ssi_disp(pred, gs, oks) / parts
+                zero += int(((pred <= 0) & oks).sum())                  # ReLU 에 막혀 0 이 된 정답 화소 (기울기가 없다)
+                tot += int(oks.sum())
+                if not torch.isfinite(part):
+                    write_json(os.path.join(a.out, "fail.json"), {"epoch": ep, "step": step, "why": "loss 가 유한하지 않음"})
+                    print(f"!!! [train-rel {name}] epoch {ep + 1} step {step}: loss 가 유한하지 않음 — 멈춤", flush=True)
+                    return 3
+                part.backward()
+                loss = part.detach() if loss is None else loss + part.detach()
             lp = None
             if lits is not None:                                   # 쌍 배치는 따로 계산해 기울기만 더한다 (메모리는 한 배치만큼만)
                 gi = random.Random(a.seed * 1000003 + step).choices(range(len(lds)), weights=[len(d) for d in lds])[0]
@@ -158,7 +169,7 @@ def main():
     os.remove(last)
     write_json(os.path.join(a.out, "done.json"), {"stage": "rel", "pairs": [len(d) for d in lds] if lds else None, "pair_bs": a.pair_bs if lds else None, "pl_weight": a.pl_weight if lds else None, "pl_trim": PL_TRIM if lds else None, "encoder": a.encoder, "seed": a.seed, "epochs": a.epochs, "bs": a.bs, "lr": a.lr, "amp": int(amp),
                                                     "images": len(ds), "steps": step, "val_aligned_abs_rel": v[0] if v else None, "val_aligned_d1": v[1] if v else None,
-                                                    "minutes": round((time.time() - t_start) / 60, 1)})
+                                                    "jitter": list(jit) if jit else None, "minutes": round((time.time() - t_start) / 60, 1)})
     print(f"[train-rel {name}] 끝 — {step} 스텝", flush=True)
     return 0
 

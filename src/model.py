@@ -226,6 +226,16 @@ def net_size(h, w):
     return max(14, round(h / 14) * 14), max(14, round(w / 14) * 14)
 
 
+def rescale(x, r):
+    """크기 바꾸기 증강: 입력 (B, 3, H, W) 을 r 배로 — 망에 들어갈 크기 (14 의 배수) 로 바로 바꾼다 (한 번만 다시 찍히게). → (바꾼 입력, 가로 배율, 세로 배율).
+    r = 1 은 평가와 같이 그대로 둔다 (망 크기 맞추기는 predict_tr · rel_forward 가 한다). 정답 · 라벨은 건드리지 않는다 (예측을 그 크기로 올려 견준다)."""
+    if r == 1.0:
+        return x, 1.0, 1.0
+    h, w = x.shape[-2:]
+    h2, w2 = net_size(round(h * r), round(w * r))
+    return F.interpolate(x, (h2, w2), mode="bilinear", align_corners=False, antialias=h2 < h), w2 / w, h2 / h
+
+
 def predict_sep(model, x, out_hw, amp=False):
     """Sep 학생: 정규화된 입력 (B, 3, H, W) → (모양 zn (B, out_h, out_w), 스케일 s (B,)), float32. 중앙값은 망의 해상도에서 빼고, 그 뒤에 정답 크기로 올린다."""
     x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
