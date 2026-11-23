@@ -4,8 +4,11 @@
 못 쓰는 화소는 0 으로 적는다: RGB 밝기 (세 채널 평균, 7×7 평균) 가 PL_DARK 미만인 곳 (선생이 볼 수 없는 어두운 곳) · 선생 값이 PL_MIN–PL_MAX m 밖이거나 유한하지 않은 곳.
 라벨은 열화상과 같은 크기다 (쌍은 화소가 맞춰져 있다). 읽는 쪽 = data.PairLabels.
 
-  python src/labels.py --sets kaist,llvip,freiburg,tartan [--encoder vitl|vits] [--bs 8] [--workers 4]
-출력: $TD_DATA/labels/<세트>/<쌍의 키>.png · labels/<세트>.json (장 수 · 쓸 화소 비율 · 깊이 중앙값). 끝난 세트는 다시 부르면 건너뛴다.
+--cam: 세트의 실제 카메라 값 (common.CAMS) 을 선생에게 준다 — 카메라 정보를 쓰는 팔 (rtn · rtf · rtk) 의 라벨. 값을 아는 세트만 (kaist · freiburg · tartan),
+  한 장씩 돌린다 (공식 코드는 카메라를 줄 때 배치를 받지 않는다). 라벨 점검에서 카메라 값을 주면 MS2 의 정답 대비 스케일 오차가 0.079 → 0.034 로 줄었다 (README '라벨 점검').
+
+  python src/labels.py --sets kaist,llvip,freiburg,tartan [--cam] [--encoder vitl|vits] [--bs 8] [--workers 4]
+출력: $TD_DATA/labels/<세트>/<쌍의 키>.png · labels/<세트>.json (장 수 · 쓸 화소 비율 · 깊이 중앙값). --cam 이면 labels_cam/ 아래. 끝난 세트는 다시 부르면 건너뛴다.
 화면: 세트마다 한 줄.
 """
 import argparse
@@ -22,7 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import data as D  # noqa: E402
-from common import PL_DARK, PL_MAX, PL_MIN, write_json  # noqa: E402
+from common import CAMS, PL_DARK, PL_MAX, PL_MIN, write_json  # noqa: E402
 from teacher_check import build_unidepth  # noqa: E402
 
 
@@ -44,9 +47,12 @@ def save_png(path, arr):
 
 
 @torch.no_grad()
-def label_batch(ud, x8):
-    """RGB (B, 3, H, W) uint8 → 라벨 (B, H, W) float32 m, 못 쓰는 화소는 0."""
-    d = ud.infer(x8)["depth"][:, 0].float()
+def label_batch(ud, x8, K=None):
+    """RGB (B, 3, H, W) uint8 → 라벨 (B, H, W) float32 m, 못 쓰는 화소는 0. K (3, 3) 를 주면 그 카메라 값을 선생에게 준다 (한 장씩)."""
+    if K is None:
+        d = ud.infer(x8)["depth"][:, 0].float()
+    else:
+        d = torch.cat([ud.infer(x8[j], K.clone())["depth"][:, 0].float() for j in range(len(x8))])
     lum = F.avg_pool2d((x8.float() / 255.0).mean(1, keepdim=True), 7, 1, 3, count_include_pad=False)[:, 0]
     ok = torch.isfinite(d) & (d >= PL_MIN) & (d <= PL_MAX) & (lum >= PL_DARK)
     return torch.where(ok, d, torch.zeros_like(d))
@@ -54,18 +60,22 @@ def label_batch(ud, x8):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sets", default=",".join(D.LABEL_SETS))
+    ap.add_argument("--sets", default="")
+    ap.add_argument("--cam", action="store_true", help="실제 카메라 값을 선생에게 준다 (labels_cam/ 에 쓴다)")
     ap.add_argument("--encoder", default="vitl")
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
     dev = torch.device(a.device)
-    root = os.path.join(os.environ["TD_DATA"], "labels")
+    sub = "labels_cam" if a.cam else "labels"
+    root = os.path.join(os.environ["TD_DATA"], sub)
     os.makedirs(root, exist_ok=True)
     ud = None
-    for name in [x for x in a.sets.split(",") if x]:
-        assert name in D.LABEL_SETS, name
+    for name in [x for x in a.sets.split(",") if x] or list(D.CAM_LABEL_SETS if a.cam else D.LABEL_SETS):
+        assert name in (D.CAM_LABEL_SETS if a.cam else D.LABEL_SETS), name
+        c = CAMS[name] if a.cam else None
+        K = torch.tensor([[c[0], 0.0, c[2]], [0.0, c[1], c[3]], [0.0, 0.0, 1.0]], dtype=torch.float32, device=dev) if c else None
         ds = Rgb(name)
         done = os.path.join(root, name + ".json")
         if os.path.exists(done):
@@ -79,7 +89,7 @@ def main():
         with ThreadPoolExecutor(max(a.workers, 1)) as pool:
             jobs = []
             for x8, idx in DataLoader(ds, batch_size=a.bs, shuffle=False, num_workers=a.workers):
-                lab = label_batch(ud, x8.to(dev))
+                lab = label_batch(ud, x8.to(dev), K)
                 if lab.shape[-2:] != x8.shape[-2:]:
                     raise SystemExit(f"!!! [labels] {name}: 선생 출력의 크기가 입력과 다름 {tuple(lab.shape[-2:])} / {tuple(x8.shape[-2:])}")
                 arr = (lab * 256.0).round().clamp(0, 65535).cpu().numpy().astype(np.uint16)
@@ -88,7 +98,7 @@ def main():
                     use += float((lab[j] > 0).float().mean())
                     if v.numel():
                         meds.append(float(v.median()))
-                    jobs.append(pool.submit(save_png, D.label_path(name, ds.items[int(idx[j])][0]), arr[j]))
+                    jobs.append(pool.submit(save_png, D.label_path(name, ds.items[int(idx[j])][0], sub=sub), arr[j]))
                 n += len(idx)
                 if time.time() - last > 120:
                     last = time.time()
@@ -99,9 +109,10 @@ def main():
                     jobs = []
             for f in jobs:
                 f.result()
-        info = {"n": n, "usable": use / max(n, 1), "depth_median_m": float(np.median(meds)) if meds else None, "encoder": a.encoder, "minutes": round((time.time() - t0) / 60, 1)}
+        info = {"n": n, "usable": use / max(n, 1), "depth_median_m": float(np.median(meds)) if meds else None, "encoder": a.encoder, "minutes": round((time.time() - t0) / 60, 1),
+                "camera": list(c) if c else None}
         write_json(done, info)
-        print(f"[labels] {name}: {n:,} 장 · 쓸 화소 {info['usable'] * 100:.1f} % · 깊이 중앙 {info['depth_median_m'] or float('nan'):.1f} m · {info['minutes']} 분", flush=True)
+        print(f"[labels] {name}{' (카메라 값을 줌)' if c else ''}: {n:,} 장 · 쓸 화소 {info['usable'] * 100:.1f} % · 깊이 중앙 {info['depth_median_m'] or float('nan'):.1f} m · {info['minutes']} 분", flush=True)
     return 0
 
 

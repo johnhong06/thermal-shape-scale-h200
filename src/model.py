@@ -6,16 +6,23 @@
 
 열화상 판 TR2M (TR — 팔 tr): 고정한 상대 깊이 모델 (Depth Anything V2 상대 깊이) 의 출력 D_r 에, 같은 모델의 마지막 층 패치 토큰을 받는 작은 모듈 (ScaleMap) 이
   화소별 scale 맵 A 와 shift 맵 B 를 내서 깊이 = 1 / (A ⊙ D_r + B). 학습하는 것은 모듈뿐이다. README '열화상 판 TR2M'.
+  카메라 정보를 쓰는 판 (README '카메라 정보'): canon = 깊이를 기준 초점 (common.F_CANON) 에서 본 것으로 배우고 평가 때 카메라 값으로 되돌린다 ·
+  ray = 토큰마다 시선 방향의 임베딩 (ray_tokens) 을 모듈 입력에 더한다. 둘 다 평가 때 카메라 값 (fx · fy · cx · cy) 이 있어야 한다.
 모양 + 스케일 학생 (Sep — 팔 sep · ours): 같은 인코더 · 같은 DPT 헤드에서 마지막 Sigmoid 만 떼어 그 앞의 값 y 를 log 깊이 꼴로 읽고,
   모양 zn = y − (사진 안 y 의 중앙값), 스케일 s = 인코더 마지막 층의 대표 토큰 → 작은 MLP, 깊이 = exp (s + zn).
 """
+import math
 import os
 import sys
 
 import torch
 import torch.nn.functional as F
 
-from common import MAX_DEPTH, MIN_DEPTH, S0
+from common import MAX_DEPTH, MIN_DEPTH, S0, cam_resize, canon_scale
+
+RAY_BANDS = 4                                                      # 시선 방향 임베딩의 주파수 띠 수 (2^k π, k = 0…3). 토큰 사이의 방향 차는 14 / 초점 ≈ 0.036 (크기를 0.71 배로 줄이면 0.05)
+                                                                   # 이라 가장 높은 띠의 위상 차가 0.9–1.3 rad — 토큰 격자에서 겹치지 않는다 (k = 5 는 3.6 rad 로 겹친다, 2026-11-23 독립 검토)
+RAY_DIM = 3 + 6 * RAY_BANDS                                        # 방향 3 + (sin · cos) × 3 × 띠
 
 CFG = {"vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
        "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
@@ -92,7 +99,7 @@ class ScaleMap(torch.nn.Module):
     공개 코드와 다른 점 하나: 두 헤드의 마지막 1×1 합성곱을 0 으로 시작해 처음 맵이 모든 화소에서 coef (0.01) 가 되게 한다.
     공개 코드의 초기화 그대로면 exp 앞의 값이 수백까지 퍼져 (ViT-L 토큰 크기에서 어림) 깊이가 0.001 m 나 80 m 쪽으로 몰리고 기울기가 사라진다 (2026-11-19 독립 검토)."""
 
-    def __init__(self, dim, heads=8, out_ch=192, feat=128, coef=0.01):
+    def __init__(self, dim, heads=8, out_ch=192, feat=128, coef=0.01, ray_dim=0):
         super().__init__()
         self.coef = coef
         self.ln1, self.ln2 = torch.nn.LayerNorm(dim), torch.nn.LayerNorm(dim)
@@ -118,8 +125,16 @@ class ScaleMap(torch.nn.Module):
         for t in (self.s2, self.t2):                                   # 처음 맵 = coef (위 설명)
             torch.nn.init.zeros_(t.m[-1].weight)
             torch.nn.init.zeros_(t.m[-1].bias)
+        # 시선 방향 임베딩 (ray_tokens) 을 토큰에 더하는 투영 — 카메라 정보 (팔 rtk). 다른 층을 다 초기화한 뒤에 만든다: 같은 시드면 나머지 가중치가 임베딩 없는 모듈과 같게.
+        # 0 으로 시작 — 처음에는 임베딩이 없는 모듈과 같은 출력.
+        self.ray = torch.nn.Linear(ray_dim, dim) if ray_dim else None
+        if self.ray is not None:
+            torch.nn.init.zeros_(self.ray.weight)
+            torch.nn.init.zeros_(self.ray.bias)
 
-    def forward(self, tok, ph, pw):
+    def forward(self, tok, ph, pw, ray=None):
+        if self.ray is not None:
+            tok = tok + self.ray(ray.to(tok.dtype))
         h = self.ln1(tok)
         x = tok + self.attn(h, h, h, need_weights=False)[0]
         x = x + self.mlp(self.ln2(x))
@@ -137,22 +152,23 @@ class TR(torch.nn.Module):
     """열화상 판 TR2M. rel = 고정한 상대 깊이 모델 (build_teacher 의 것). forward → (D_r, A, B), 모두 (B, 14 ph, 14 pw) float32.
     고정한 쪽은 기울기 없이 돌리고 늘 eval 로 둔다. 영상 특징 = rel 의 마지막 층 패치 토큰 (정규화한 것) — 큰 모델을 한 번만 돌린다."""
 
-    def __init__(self, rel):
+    def __init__(self, rel, ray=False, canon=False):
         super().__init__()
         self.rel = rel.eval().requires_grad_(False)
-        self.scalemap = ScaleMap(rel.pretrained.embed_dim)
+        self.scalemap = ScaleMap(rel.pretrained.embed_dim, ray_dim=RAY_DIM if ray else 0)
+        self.register_buffer("canon", torch.tensor(bool(canon)))      # 출력이 기준 초점의 깊이인가 (common.canon_scale) — 체크포인트에 남겨 평가가 되돌린다
 
     def train(self, mode=True):
         super().train(mode)
         self.rel.eval()
         return self
 
-    def forward(self, x):
+    def forward(self, x, ray=None):
         ph, pw = x.shape[-2] // 14, x.shape[-1] // 14
         with torch.no_grad():
             feats = self.rel.pretrained.get_intermediate_layers(x, self.rel.intermediate_layer_idx[self.rel.encoder], return_class_token=True)
             dr = self.rel.depth_head(feats, ph, pw)[:, 0].float()      # 상대 깊이 (역깊이 꼴, ReLU)
-        a, b = self.scalemap(feats[-1][0], ph, pw)
+        a, b = self.scalemap(feats[-1][0], ph, pw, ray)
         return dr, a, b
 
 
@@ -162,16 +178,46 @@ def tr_depth(dr, a, b):
     return 1.0 / (a * dr + b).clamp(min=1e-8)
 
 
-def build_tr(encoder="vitl", weights=""):
-    """weights = 상대 깊이 체크포인트 (전부 싣는다). 비우면 무작위 초기화 (시험용)."""
-    return TR(build_teacher(encoder, weights))
+def build_tr(encoder="vitl", weights="", ray=False, canon=False):
+    """weights = 상대 깊이 체크포인트 (전부 싣는다). 비우면 무작위 초기화 (시험용). ray · canon = 카메라 정보를 쓰는 팔 (TR 의 설명)."""
+    return TR(build_teacher(encoder, weights), ray, canon)
 
 
-def predict_tr(model, x, out_hw, amp=False):
-    """TR: 정규화된 입력 → (깊이 (B, out_h, out_w), A, B, D_r (망 입력 크기), 망 입력 크기의 입력). 학습의 손실이 맵과 입력을 함께 쓴다."""
-    x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
+def ray_tokens(cam, in_hw, net_hw, bands=RAY_BANDS):
+    """카메라 값 cam (B, 4) = 입력 영상 (in_hw) 기준 fx · fy · cx · cy → 토큰 (14×14 패치의 가운데) 마다 시선 방향의 푸리에 임베딩 (B, ph · pw, RAY_DIM).
+    방향 = normalize(K⁻¹ [u, v, 1]) — ZeroDepth (Guizilini 외, ICCV 2023) 의 기하 임베딩과 같은 꼴. 망에 넣으며 영상 크기가 바뀐 만큼 카메라 값도 바꾼다."""
+    (h, w), (hn, wn) = in_hw, net_hw
+    c = cam_resize(cam.float(), wn / w, hn / h)
+    ph, pw = hn // 14, wn // 14
+    u = (torch.arange(pw, device=cam.device, dtype=torch.float32) + 0.5) * 14 - 0.5
+    v = (torch.arange(ph, device=cam.device, dtype=torch.float32) + 0.5) * 14 - 0.5
+    x = ((u[None, None, :] - c[:, 2, None, None]) / c[:, 0, None, None]).expand(-1, ph, -1)
+    y = ((v[None, :, None] - c[:, 3, None, None]) / c[:, 1, None, None]).expand(-1, -1, pw)
+    r = torch.stack([x, y, torch.ones_like(x)], -1)
+    r = (r / r.norm(dim=-1, keepdim=True)).reshape(len(cam), ph * pw, 3)
+    ang = r[..., None] * ((2.0 ** torch.arange(bands, device=cam.device, dtype=torch.float32)) * math.pi)
+    return torch.cat([r, ang.sin().flatten(-2), ang.cos().flatten(-2)], -1)
+
+
+def canon_of(cam, in_hw):
+    """입력 영상 (in_hw) 의 카메라 값 (B, 4) → 기준 초점으로의 환산 배율 (B,): 기준 깊이 = 실제 깊이 × 이 값.
+    망이 보는 크기 (14 의 배수로 맞춘 뒤) 의 초점으로 센다 — 시선 방향 임베딩 (ray_tokens) 과 같은 기준이고, 학습 · 평가가 이 함수 하나를 쓴다."""
+    (h, w), (hn, wn) = in_hw, net_size(*in_hw)
+    return canon_scale(cam_resize(cam.float(), wn / w, hn / h))
+
+
+def predict_tr(model, x, out_hw, amp=False, cam=None):
+    """TR: 정규화된 입력 → (깊이 (B, out_h, out_w), A, B, D_r (망 입력 크기), 망 입력 크기의 입력). 학습의 손실이 맵과 입력을 함께 쓴다.
+    cam (B, 4) = 입력 영상 기준의 카메라 값 — 시선 방향 임베딩을 쓰는 모듈에는 꼭 준다. 깊이는 모듈이 낸 그대로다 (model.canon 이면 기준 초점의 깊이 — 되돌리기는 predict 가)."""
+    in_hw = x.shape[-2:]
+    x = F.interpolate(x, net_size(*in_hw), mode="bilinear", align_corners=False)
+    ray = None
+    if model.scalemap.ray is not None:
+        if cam is None:
+            raise ValueError("시선 방향 임베딩을 쓰는 모델에는 카메라 값을 줘야 한다")
+        ray = ray_tokens(cam, in_hw, x.shape[-2:])
     with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
-        dr, a, b = model(x)
+        dr, a, b = model(x, ray)
     d = F.interpolate(tr_depth(dr, a, b)[:, None], out_hw, mode="bilinear", align_corners=True)[:, 0]
     return d, a, b, dr, x
 
@@ -194,12 +240,18 @@ def sep_depth(zn, s):
     return torch.exp((s[:, None, None] + zn).clamp(-10.0, 10.0)).clamp(MIN_DEPTH, MAX_DEPTH)
 
 
-def predict(model, x, out_hw, amp=False):
-    """정규화된 입력 (B, 3, H, W) → 깊이 (B, out_h, out_w) m, float32. 공식 평가처럼 bilinear · align_corners=True 로 정답 크기에 맞춘다."""
+def predict(model, x, out_hw, amp=False, cam=None):
+    """정규화된 입력 (B, 3, H, W) → 깊이 (B, out_h, out_w) m, float32. 공식 평가처럼 bilinear · align_corners=True 로 정답 크기에 맞춘다.
+    cam (B, 4) = 입력 영상의 카메라 값 — 카메라 정보를 쓰는 TR (시선 방향 임베딩 · 기준 초점) 에만 쓰인다. 기준 초점의 깊이는 여기서 실제 깊이로 되돌린다."""
     if isinstance(model, Sep):
         return sep_depth(*predict_sep(model, x, out_hw, amp))
     if isinstance(model, TR):
-        return predict_tr(model, x, out_hw, amp)[0]
+        d = predict_tr(model, x, out_hw, amp, cam)[0]
+        if bool(model.canon):
+            if cam is None:
+                raise ValueError("기준 초점으로 배운 모델에는 카메라 값을 줘야 한다")
+            d = d / canon_of(cam, x.shape[-2:])[:, None, None]
+        return d
     x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
     with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
         d = model(x)
@@ -220,7 +272,8 @@ def load(encoder, ckpt):
     """학습한 모델 (final.pt) 을 싣는다 — 스케일 헤드가 들어 있으면 Sep, 축척 맵 모듈이 들어 있으면 TR (고정한 상대 깊이 모델까지 체크포인트에 들어 있다)."""
     sd = torch.load(ckpt, map_location="cpu", weights_only=True)
     if any(k.startswith("scalemap.") for k in sd):
-        m = build_tr(encoder)
+        sd.setdefault("canon", torch.tensor(False))                    # 앞선 판의 체크포인트에는 없다
+        m = build_tr(encoder, ray="scalemap.ray.weight" in sd, canon=bool(sd["canon"]))
         m.load_state_dict(sd)
         return m
     m = build(encoder)

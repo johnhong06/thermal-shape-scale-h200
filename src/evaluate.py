@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import FX, METRICS, VARIANTS, eval_mask, variants, write_json  # noqa: E402
+from common import CAMS, FX, FX_TRAIN, METRICS, VARIANTS, eval_mask, variants, write_json  # noqa: E402
 
 TEST_SETS = ("test_day", "test_night", "test_rainy", "fire", "vivid", "vivid_day", "vivid_in", "sthereo")
 
@@ -37,12 +37,14 @@ def eval_set(model, name, dev, limit=0, bs=16, workers=4, amp=False, samples=0, 
     keep = {round(i * (len(ds) - 1) / max(samples - 1, 1)) for i in range(samples)} if samples else set()
     rows = []
     model.eval()
+    cam = torch.tensor(CAMS[ds.fx_key], dtype=torch.float32, device=dev)   # 카메라 정보를 쓰는 모델 (TR 의 ray · canon) 만 읽는다
+    fx = FX_TRAIN if bool(getattr(model, "canon", False)) else FX[ds.fx_key]   # 기준 초점으로 배운 모델은 predict 가 이미 초점을 되돌렸다 → focal 은 raw 와 같게 둔다
     for x, gt, idx in loader:
         gt = gt.to(dev)
-        pred = M.predict(model, x.to(dev, non_blocking=True), gt.shape[-2:], amp)
+        pred = M.predict(model, x.to(dev, non_blocking=True), gt.shape[-2:], amp, cam[None].expand(len(x), 4))
         for j in range(len(idx)):
             i = int(idx[j])
-            v = variants(pred[j], gt[j], eval_mask(gt[j], ds.border), FX[ds.fx_key])
+            v = variants(pred[j], gt[j], eval_mask(gt[j], ds.border), fx)
             if v is not None:
                 rows.append({"i": i, "key": ds.items[i][0], **v})
             if i in keep and out:

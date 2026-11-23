@@ -65,6 +65,9 @@ def fake_tree(root, rng):
             lab[: h // 8] = 0
             os.makedirs(os.path.dirname(D.label_path(name, key, root)), exist_ok=True)
             Image.fromarray(lab).save(D.label_path(name, key, root))
+            if name in D.CAM_LABEL_SETS:                               # 카메라 값을 주고 뽑은 라벨 (labels.py --cam) — 값을 아는 쌍만
+                os.makedirs(os.path.dirname(D.label_path(name, key, root, "labels_cam")), exist_ok=True)
+                Image.fromarray(lab // 2).save(D.label_path(name, key, root, "labels_cam"))
 
 
 class Parts(unittest.TestCase):
@@ -196,6 +199,17 @@ class Parts(unittest.TestCase):
         x8[:, :, 30:] = 0                                              # 아래쪽은 어두움 → 못 쓰는 화소
         lab = L.label_batch(Fake(), x8)
         self.assertEqual((tuple(lab.shape), lab.dtype), ((2, 40, 64), torch.float32))
+
+        class FakeCam:                                              # 카메라 값을 주면 한 장씩 부른다 (공식 코드의 길)
+            calls = []
+
+            def infer(self, x, K):
+                assert x.ndim == 3 and tuple(K.shape) == (3, 3)
+                FakeCam.calls.append(float(K[0, 0]))
+                return {"depth": torch.full((1, 1) + tuple(x.shape[-2:]), 7.0)}
+        labc = L.label_batch(FakeCam(), x8, torch.eye(3) * 500.0)
+        self.assertEqual((tuple(labc.shape), FakeCam.calls), ((2, 40, 64), [500.0, 500.0]))
+        self.assertTrue(float(labc[:, :20].min()) == 7.0 and not (labc[:, 34:] > 0).any())
         ok = lab > 0
         self.assertTrue(not ok[:, 34:].any() and not ok[:, 0, 5].any())             # 어두운 곳 · 유한하지 않은 값
         self.assertTrue(float(lab[ok].min()) >= C.PL_MIN and float(lab[ok].max()) <= C.PL_MAX and 0.5 < float(ok[:, :20].float().mean()) < 0.75)   # 0.1–200 m 만
@@ -645,6 +659,91 @@ class Parts(unittest.TestCase):
         self.assertAlmostEqual(s_["ratio_med"], 1.5)
         self.assertIn("640×512", line)
         self.assertIn("실제의 1.11 배", line)
+
+    def test_camera(self):
+        M = self.M
+        ms2, kaist = torch.tensor(C.CAMS["ms2"]), torch.tensor(C.CAMS["kaist"])
+        self.assertEqual(D.CAM_LABEL_SETS, ("kaist", "freiburg", "tartan"))
+        self.assertAlmostEqual(float(C.canon_scale(ms2)), 1.0, places=6)                     # 기준 초점 = MS2 → MS2 의 깊이는 그대로
+        self.assertAlmostEqual(float(C.canon_scale(kaist)), 387.787 / 722.92, places=4)       # 초점이 긴 카메라의 깊이는 줄여서 배운다
+        r = C.cam_resize(ms2, 2.0, 0.5)
+        self.assertAlmostEqual(float(r[0]), 775.574, places=2)
+        self.assertAlmostEqual(float(r[1]), 193.8935, places=3)
+        self.assertAlmostEqual(float(r[2]), (300.82 + 0.5) * 2 - 0.5, places=3)
+        self.assertAlmostEqual(float(C.cam_flip(ms2, 640)[2]), 639 - 300.82, places=3)
+        self.assertAlmostEqual(float(C.canon_scale(C.cam_resize(ms2, 2.0, 2.0))), 0.5, places=6)   # 두 배로 키우면 (가깝게 보이면) 기준 깊이는 절반
+        self.assertEqual(len(C.JITTER), 9)
+        self.assertAlmostEqual(C.JITTER[4], 1.0)
+        cam = torch.tensor([[400.0, 400.0, 321.5, 258.5]])                                       # 망 입력 644×518 의 가운데 토큰 = 주점
+        t = M.ray_tokens(cam, (518, 644), (518, 644))
+        self.assertEqual(tuple(t.shape), (1, 37 * 46, M.RAY_DIM))
+        g = t.reshape(37, 46, M.RAY_DIM)
+        self.assertTrue(torch.allclose(g[18, 23, :3], torch.tensor([7.0 / 400, 0.0, 1.0]) / (1 + (7 / 400) ** 2) ** 0.5, atol=1e-5))
+        self.assertTrue(float(g[18, 0, 0]) < 0 < float(g[18, 45, 0]) and float(g[0, 23, 1]) < 0 < float(g[36, 23, 1]))
+        self.assertTrue(torch.allclose(t[..., :3].norm(dim=-1), torch.ones(1, 37 * 46), atol=1e-5))
+        t2 = M.ray_tokens(C.cam_resize(cam, 0.5, 0.5), (259, 322), (518, 644))                  # 영상을 줄여 넣어도 망에 들어갈 때의 방향은 같다
+        self.assertTrue(torch.allclose(t, t2, atol=1e-4))
+        wide = M.ray_tokens(torch.tensor([[200.0, 200.0, 321.5, 258.5]]), (518, 644), (518, 644)).reshape(37, 46, -1)
+        self.assertGreater(float(wide[18, 45, 0]), float(g[18, 45, 0]))                           # 초점이 짧으면 (화각이 넓으면) 같은 토큰의 방향이 더 벌어진다
+        torch.manual_seed(3)
+        sm = M.ScaleMap(64, heads=4, out_ch=16, feat=16, ray_dim=M.RAY_DIM).eval()
+        tok = torch.randn(1, 2 * 3, 64)
+        r1, r2 = torch.randn(1, 6, M.RAY_DIM), torch.zeros(1, 6, M.RAY_DIM)
+        with torch.no_grad():
+            a1, a2 = sm(tok, 2, 3, r1)[0], sm(tok, 2, 3, r2)[0]
+            self.assertTrue(torch.equal(a1, a2))                                                    # 임베딩의 투영은 0 으로 시작 → 처음에는 영향이 없다
+            torch.nn.init.normal_(sm.ray.weight, std=0.5)
+            torch.nn.init.normal_(sm.s2.m[-1].weight, std=0.5)
+            self.assertFalse(torch.allclose(sm(tok, 2, 3, r1)[0], sm(tok, 2, 3, r2)[0]))
+        tr = M.build_tr("vits", ray=True, canon=True).eval()
+        self.assertTrue(bool(tr.canon) and tr.scalemap.ray is not None)
+        x = torch.randn(2, 3, 126, 154)
+        cams = torch.stack([ms2, kaist])
+        with torch.no_grad():
+            dc = M.predict_tr(tr, x, (126, 154), False, cams)[0]
+            d = M.predict(tr, x, (126, 154), False, cams)
+        self.assertTrue(torch.allclose(d[0], dc[0], rtol=1e-5))                                      # MS2 의 카메라면 그대로
+        self.assertTrue(torch.allclose(d[1], dc[1] * (722.92 / 387.787), rtol=1e-4))                 # 초점이 긴 카메라는 평가 때 그만큼 멀게 되돌린다
+        with self.assertRaises(ValueError):
+            M.predict(tr, x, (126, 154), False)
+        with tempfile.TemporaryDirectory() as t_:
+            f = os.path.join(t_, "final.pt")
+            torch.save(tr.state_dict(), f)
+            m2 = M.load("vits", f)
+            self.assertTrue(bool(m2.canon) and m2.scalemap.ray is not None)
+            old = M.build_tr("vits").state_dict()
+            del old["canon"]                                                                         # 앞선 판의 체크포인트 (canon 없음) 도 읽는다
+            torch.save(old, f)
+            m3 = M.load("vits", f)
+            self.assertTrue(not bool(m3.canon) and m3.scalemap.ray is None)
+            with torch.no_grad():
+                self.assertEqual(tuple(M.predict(m3, x, (126, 154)).shape), (2, 126, 154))
+        import train as T
+        self.assertEqual(T.CAM_ARMS, {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True)})
+        self.assertTrue(all(a in T.ARMS and a not in T.LABEL_ARMS for a in T.CAM_ARMS))
+        xj, cj = T.jitter(torch.zeros(2, 3, 256, 640), ms2[None].expand(2, 4), C.JITTER[0])
+        self.assertEqual(tuple(xj.shape), (2, 3, 182, 448))                                          # 망에 들어갈 크기 (14 의 배수) 로 바로
+        self.assertAlmostEqual(float(cj[0, 0]), 387.787 * 448 / 640, places=2)
+        self.assertAlmostEqual(float(M.canon_of(cj, xj.shape[-2:])[0]), 387.787 / (387.787 * (448 / 640 * 182 / 256) ** 0.5), places=4)
+        self.assertAlmostEqual(float(M.canon_of(ms2[None], (256, 640))[0]), 1 / (644 / 640 * 252 / 256) ** 0.5, places=5)   # 망이 보는 크기 (252×644) 의 초점으로 센다
+        self.assertEqual(M.RAY_DIM, 27)
+        dr_, gt_ = torch.full((1, 20, 20), 0.01), torch.full((1, 20, 20), 100.0)                     # 기준 초점의 깊이가 80 m 를 넘어도 상한을 같이 주면 의사 정답으로 쓴다
+        mk = torch.ones(1, 20, 20, dtype=torch.bool)
+        dr_[0, :10] = 0.02
+        gt_[0, :10] = 50.0
+        aa = torch.full((1, 20, 20), 0.5, requires_grad=True)
+        self.assertEqual(C.tr_pseudo(aa, aa, dr_, gt_, mk)[1], 0)
+        self.assertEqual(C.tr_pseudo(aa, aa, dr_, gt_, mk, dmax=torch.tensor([120.0]))[1], 1)
+        self.assertIs(T.jitter(x, cams, 1.0)[0], x)
+        ds = D.PairLabels(["kaist", "tartan"], sub="labels_cam", cams=True)                          # 카메라 값을 아는 쌍 + 카메라 값을 주고 뽑은 라벨
+        self.assertEqual([n for n, _, _ in ds.items], ["kaist", "kaist", "tartan"])
+        xx, lab, cc = ds[2]
+        self.assertTrue(torch.allclose(cc, torch.tensor(C.CAMS["tartan"])) and float(lab.max()) <= 20.5 and tuple(xx.shape) == (3, 512, 640))
+        th = D.Thermal("train", aug="base", seed=5)                                                  # 뒤집기 여부를 학습 쪽이 다시 알아낼 수 있어야 한다 (카메라 값을 같이 뒤집으려고)
+        plain = D.Thermal("train")
+        for i in range(len(th)):
+            same = torch.equal(th[i][0], plain[i][0])
+            self.assertEqual(D.flipped(5, 0, i), not same)
 
     def test_rel_check(self):
         import rel_check as RC

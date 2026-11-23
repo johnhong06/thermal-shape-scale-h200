@@ -11,6 +11,7 @@
 모양 + 스케일 학생 (팔 sep · ours, README '본 실험 3') 의 손실 = shape_scale. 학생은 모양 zn (log 깊이에서 사진의 중앙값을 뺀 것) 과 스케일 s 를 따로 낸다.
 """
 import json
+import math
 import os
 import random
 
@@ -23,6 +24,23 @@ MIN_VALID = 10            # 범위 안 정답 픽셀이 이보다 적은 사진�
 # 열화상 카메라 초점거리 (px, 가로 640 기준). ms2 = calib.npy 의 K_thrL (20 시퀀스 같음) · fire = 저자 firestereo.yaml cam0 · vivid = calib_ther_to_rgb.yaml 의 K_Thermal
 FX = {"ms2": 387.787, "fire": 406.332, "vivid": 437.389, "sthereo": 429.433}      # sthereo = thermal_14bit_left.yaml 의 camera_matrix (영상은 왜곡을 편 것)
 FX_TRAIN = FX["ms2"]
+# 카메라 값 (fx, fy, cx, cy) px — 묶음의 영상 크기 기준. 열화상 평가 세트 넷 + 쌍 (열화상 시점) + MS2 의 RGB. None = 모름. README '카메라 정보'.
+_FR = (1017.8272, 1016.6098, 969.2854, 300.0874)                  # Freiburg Thermal 의 RGB 앞 왼쪽 (1920×650) — 저자 코드 저장소의 front_stereo_calibration.yaml
+_FR_BOX, _FR_SIZE = (307, 0, 1702, 650), (640, 298)               # 우리 묶음이 자른 상자 (왼 · 위 · 오른 + 1 · 아래 + 1) 와 줄인 크기
+_sx, _sy = _FR_SIZE[0] / (_FR_BOX[2] - _FR_BOX[0]), _FR_SIZE[1] / (_FR_BOX[3] - _FR_BOX[1])
+CAMS = {
+    "ms2": (FX["ms2"], 387.787, 300.82, 151.626),                              # calib.npy 의 K_thrL (640×256)
+    "fire": (FX["fire"], 406.954, 311.512, 241.759),                           # firestereo.yaml cam0 (640×512)
+    "vivid": (FX["vivid"], 437.295, 323.528, 256.363),                         # calib_ther_to_rgb.yaml 의 K_Thermal (640×512)
+    "sthereo": (FX["sthereo"], 429.531, 311.119, 266.128),                     # thermal_14bit_left.yaml (640×512, 왜곡을 편 영상)
+    "kaist": (256.0 / math.tan(math.radians(19.5)),) * 2 + (320.0, 256.0),    # 논문: 맞춘 영상 640×512 의 세로 화각 39° (FLIR A35, 9 mm). 주점은 가운데로 둔다
+    "freiburg": (_FR[0] * _sx, _FR[1] * _sy, (_FR[2] - _FR_BOX[0]) * _sx, (_FR[3] - _FR_BOX[1]) * _sy),   # 맞춘 열화상은 RGB 시점. 공개 영상이 왜곡을 편 것인지는 모른다
+    "tartan": (421.23237, 420.80872, 317.55166, 255.54589),                    # 공개 저장소 calibration/thermal_left.yaml (640×512, RGB 는 이 시점으로 옮긴 것)
+    "llvip": None,                                                              # 논문 · 묶음에 값이 없다
+    "ms2_rgb": (764.514, 764.514, 579.547, 153.005),                           # calib.npy 의 K_rgbL (1224×384, 20 시퀀스 같음)
+}
+F_CANON = FX_TRAIN        # 기준 초점거리 (px) — 깊이를 이 카메라에서 본 것으로 환산해 가르친다 (MS2 는 그대로)
+JITTER = tuple(2.0 ** (k / 8.0) for k in range(-4, 5))            # 크기 바꾸기 증강의 배율 아홉 (0.71–1.41, 1.0 포함) — 카메라 값도 같이 바꾼다
 # ViViD 후처리본의 보정값 (calib_ther_to_rgb.yaml) — 영상은 왜곡을 편 것이라 K 만 쓴다. X_rgb = R · X_thermal + T (m).
 # 두 시점의 LiDAR 깊이 지도로 확인: 이 식으로 열화상 시점의 점을 RGB 로 옮기면 99.8 % 가 RGB 시점 깊이와 맞는다 (2026-11-16).
 VIVID_K_T = ((437.38861083256637, 0.0, 323.5284494924228), (0.0, 437.29475745770907, 256.36315482047905), (0.0, 0.0, 1.0))
@@ -205,13 +223,15 @@ def fit_inv(dr, gt, mask):
     return s, t
 
 
-def tr_pseudo(a, b, dr, gt, mask, thr=TP_THR):
+def tr_pseudo(a, b, dr, gt, mask, thr=TP_THR, dmax=None):
     """TR2M 의 의사 정답 손실 (공개 코드 SelfThresholdScaleLoss 를 옮김). 사진마다 상대 깊이 dr 을 역깊이 정답에 맞추고 (s, t), 맞춘 깊이 1 / (s · dr + t) 가
     정답 화소의 thr 넘게 δ1 (1.25 안) 에 들면 그 사진의 scale 맵 a · shift 맵 b 를 상수 s · t 쪽으로 (L1, 화소 평균). 정답이 드문 화소까지 맵을 가르치려는 것.
-    a · b = (B, h, w) 맵 · dr · gt · mask = (B, H, W) 정답 해상도. → (손실, 쓴 사진 수). 쓴 사진이 없으면 0 (기울기는 이어진다)."""
+    a · b = (B, h, w) 맵 · dr · gt · mask = (B, H, W) 정답 해상도. → (손실, 쓴 사진 수). 쓴 사진이 없으면 0 (기울기는 이어진다).
+    dmax (B,) = 맞춘 깊이의 상한 — 정답을 기준 초점의 깊이로 바꿔 줄 때 80 m 도 같이 바꾼 값 (안 주면 MAX_DEPTH)."""
     with torch.no_grad():
         s, t = fit_inv(dr, gt, mask)
-        d = 1.0 / (s[:, None, None] * dr.double() + t[:, None, None]).clamp(min=1.0 / MAX_DEPTH)
+        den = s[:, None, None] * dr.double() + t[:, None, None]
+        d = 1.0 / (den.clamp(min=1.0 / MAX_DEPTH) if dmax is None else torch.maximum(den, (1.0 / dmax.double())[:, None, None]))
         r = d / gt.double().clamp(min=MIN_DEPTH)
         good = ((r < 1.25) & (1.0 / r < 1.25) & mask).double().sum((1, 2)) / mask.double().sum((1, 2)).clamp(min=1.0)
         use = (good > thr) & (s > 0)
@@ -243,3 +263,17 @@ def vivid_grid(h=512, w=640, hr=480, wr=640, z0=PL_Z0):
     grid = torch.stack([ur / (wr - 1) * 2 - 1, vr / (hr - 1) * 2 - 1], -1)[None].float()
     return grid, inside
 
+
+def cam_resize(cam, rx, ry):
+    """영상을 가로 rx · 세로 ry 배로 바꿨을 때의 카메라 값. cam (..., 4) = fx · fy · cx · cy (화소 가운데가 정수 좌표)."""
+    return torch.stack([cam[..., 0] * rx, cam[..., 1] * ry, (cam[..., 2] + 0.5) * rx - 0.5, (cam[..., 3] + 0.5) * ry - 0.5], -1)
+
+
+def cam_flip(cam, w):
+    """영상을 좌우로 뒤집었을 때의 카메라 값 (가로 w 화소)."""
+    return torch.stack([cam[..., 0], cam[..., 1], (w - 1) - cam[..., 2], cam[..., 3]], -1)
+
+
+def canon_scale(cam):
+    """기준 초점으로의 환산 배율 (...,): 기준 깊이 = 실제 깊이 × 이 값. 같은 모습이면 초점이 긴 카메라일수록 실제로는 멀다 — 그 몫을 뺀다."""
+    return F_CANON / (cam[..., 0] * cam[..., 1]).sqrt()

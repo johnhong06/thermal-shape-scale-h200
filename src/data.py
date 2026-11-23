@@ -30,6 +30,9 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from common import CAMS  # noqa: E402
+
 MS2_SETS = ("train", "val", "test_day", "test_night", "test_rainy")
 VIVID = {"vivid": ("outdoor_robust_night1", "outdoor_robust_night2"), "vivid_day": ("outdoor_robust_day1", "outdoor_robust_day2"),
          "vivid_in": ("indoor_robust_dark", "indoor_robust_varying", "indoor_aggresive_dark", "indoor_unstable_dark", "indoor_aggresive_local")}
@@ -37,6 +40,8 @@ SETS = MS2_SETS + ("fire",) + tuple(VIVID) + ("sthereo",)
 PAIR_SETS = ("kaist", "llvip", "vivid_day", "freiburg", "tartan")
 LABEL_SETS = ("kaist", "llvip", "freiburg", "tartan")       # 팔 ours · rtp · mtd 가 쓰는 쌍 — 평가 대상 (ViViD) 의 것은 넣지 않는다
 LABEL_GROUPS = (("kaist", "llvip", "tartan"), ("freiburg",))     # 같은 배치에 묶는 쌍 — 크기가 같은 것끼리 (640×512 · 640×298)
+CAM_LABEL_SETS = tuple(n for n in LABEL_SETS if CAMS[n])          # 카메라 값을 아는 쌍 (kaist · freiburg · tartan) — 카메라 정보를 쓰는 팔 (rtn · rtf · rtk) 의 쌍
+CAM_LABEL_GROUPS = (("kaist", "tartan"), ("freiburg",))
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)[:, None, None]
 STD = np.array([0.229, 0.224, 0.225], np.float32)[:, None, None]
 
@@ -125,6 +130,11 @@ def load_pair(img_path, depth_path):
     return raw, dep.astype(np.float32) / 256.0
 
 
+def flipped(seed, epoch, i):
+    """학습 증강 (좌우 뒤집기) 이 이 사진에 걸렸는가 — Thermal 이 쓰는 것과 같은 난수. 카메라 값을 같이 뒤집을 때 학습 쪽이 다시 부른다."""
+    return bool(np.random.default_rng([seed, epoch, i]).random() < 0.5)
+
+
 class Thermal(Dataset):
     def __init__(self, name, limit=0, aug=None, seed=0, root=None):
         assert name in SETS and aug in (None, "base")
@@ -141,9 +151,8 @@ class Thermal(Dataset):
     def __getitem__(self, i):
         key, ip, dp = self.items[i]
         raw, dep = load_pair(ip, dp)
-        rng = np.random.default_rng([self.seed, self.epoch, i]) if self.aug else None
         x = tone(raw)
-        if rng is not None and rng.random() < 0.5:
+        if self.aug and flipped(self.seed, self.epoch, i):
             x, dep = x[:, ::-1], dep[:, ::-1]
         x = (np.repeat(np.ascontiguousarray(x)[None], 3, 0) - MEAN) / STD
         return torch.from_numpy(x), torch.from_numpy(np.ascontiguousarray(dep)), i
@@ -169,17 +178,17 @@ class Pairs(Dataset):
         return torch.from_numpy(x), torch.from_numpy(np.ascontiguousarray(rgb))
 
 
-def label_path(name, key, root=None):
-    """쌍 (세트, 키) 의 선생 라벨 파일 — src/labels.py 가 쓰고 PairLabels 가 읽는다."""
-    return os.path.join(root or os.environ["TD_DATA"], "labels", name, os.path.splitext(key)[0] + ".png")
+def label_path(name, key, root=None, sub="labels"):
+    """쌍 (세트, 키) 의 선생 라벨 파일 — src/labels.py 가 쓰고 PairLabels 가 읽는다. sub = labels (카메라 없이 뽑은 것) · labels_cam (카메라 값을 주고 뽑은 것)."""
+    return os.path.join(root or os.environ["TD_DATA"], sub, name, os.path.splitext(key)[0] + ".png")
 
 
 class PairLabels(Dataset):
     """쌍 + 미리 뽑아 둔 선생 라벨 → (열화상 입력 (3, H, W), 선생 깊이 (H, W) m — 못 쓰는 화소는 0). 한 세트 안에서는 크기가 같다."""
 
-    def __init__(self, names, limit=0, root=None):
+    def __init__(self, names, limit=0, root=None, sub="labels", cams=False):
         self.items = [(n, k, tp) for n in names for k, tp, _ in pair_frames(n, root)]
-        self.root = root
+        self.root, self.sub, self.cams = root, sub, cams              # cams = 세트의 카메라 값 (common.CAMS) 도 함께 낸다
         if limit and limit < len(self.items):
             self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
 
@@ -190,11 +199,12 @@ class PairLabels(Dataset):
         name, key, tp = self.items[i]
         t = Image.open(tp)
         t = np.array(t if t.mode in ("L", "I;16", "I") else t.convert("L"))
-        lab = np.array(Image.open(label_path(name, key, self.root)))
+        lab = np.array(Image.open(label_path(name, key, self.root, self.sub)))
         if lab.dtype != np.uint16 or lab.shape != t.shape:
             raise ValueError(f"예상과 다른 라벨: {name}/{key} {lab.shape} {lab.dtype} / 열화상 {t.shape}")
         x = (np.repeat(tone(t)[None], 3, 0) - MEAN) / STD
-        return torch.from_numpy(x), torch.from_numpy(lab.astype(np.float32) / 256.0)
+        out = (torch.from_numpy(x), torch.from_numpy(lab.astype(np.float32) / 256.0))
+        return out + (torch.tensor(CAMS[name], dtype=torch.float32),) if self.cams else out
 
 
 def check():

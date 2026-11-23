@@ -12,7 +12,6 @@ MS2 의 RGB (LiDAR 정답과 카메라 값이 있다) 에서는 ① · ② 를 �
 """
 import argparse
 import csv
-import math
 import os
 import sys
 import time
@@ -25,23 +24,11 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import data as D  # noqa: E402
-from common import MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MAX, PL_MIN, write_json  # noqa: E402
+from common import CAMS, MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MAX, PL_MIN, write_json  # noqa: E402
 from teacher_check import build_unidepth, frames  # noqa: E402
 
 INFLATE = 1.15            # 사진별 깊이 비 (카메라 없이 / 카메라 값을 주고) 의 중앙값이 이 이상이면 '멀게 부풂', 1 / 이 값 이하면 '가깝게 쏠림'
 MS2_TOL = 0.01            # MS2: 카메라 값을 줬을 때 스케일 오차 중앙값이 이만큼 넘게 줄면 '바로잡음', 늘면 '나빠짐'
-_FR = (1017.8272, 1016.6098, 969.2854, 300.0874)                  # Freiburg Thermal 의 RGB 앞 왼쪽 (1920×650) — 저자 코드 저장소의 front_stereo_calibration.yaml
-_FR_BOX, _FR_SIZE = (307, 0, 1702, 650), (640, 298)               # 우리 묶음이 자른 상자 (왼 · 위 · 오른 + 1 · 아래 + 1) 와 줄인 크기
-_sx, _sy = _FR_SIZE[0] / (_FR_BOX[2] - _FR_BOX[0]), _FR_SIZE[1] / (_FR_BOX[3] - _FR_BOX[1])
-# 세트마다 묶음 영상의 카메라 값 (fx, fy, cx, cy) px · 근거. None = 모름.
-CAMS = {
-    "kaist": (256.0 / math.tan(math.radians(19.5)),) * 2 + (320.0, 256.0),   # 논문: 맞춘 영상 640×512 의 세로 화각 39° (FLIR A35, 9 mm). 주점은 가운데로 둔다
-    "freiburg": (_FR[0] * _sx, _FR[1] * _sy, (_FR[2] - _FR_BOX[0]) * _sx, (_FR[3] - _FR_BOX[1]) * _sy),   # 맞춘 열화상은 RGB 시점. 공개 영상이 왜곡을 편 것인지는 모른다
-    "tartan": (421.23237, 420.80872, 317.55166, 255.54589),                    # 공개 저장소 calibration/thermal_left.yaml (640×512, RGB 는 이 시점으로 옮긴 것)
-    "llvip": None,                                                              # 논문 · 묶음에 값이 없다
-    "ms2_rgb": (764.514, 764.514, 579.547, 153.005),                           # calib.npy 의 K_rgbL (1224×384, 20 시퀀스 같음)
-}
-
 
 def kmat(c):
     return torch.tensor([[c[0], 0.0, c[2]], [0.0, c[1], c[3]], [0.0, 0.0, 1.0]], dtype=torch.float32)
