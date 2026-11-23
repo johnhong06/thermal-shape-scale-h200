@@ -4,7 +4,7 @@ Depth Anything V2 상대 깊이 모델 (체크포인트 전부, model.build_rel)
 손실 = common.ssi_disp (사진마다 중앙값 · 평균 절대 편차로 맞춘 역깊이의 절대 오차, 정답 화소만). 나머지는 base 와 같다:
   AdamW (weight decay 0.01) · 학습률 인코더 lr · 헤드 lr × 10 · 스텝마다 (1 − 진행)^0.9 · 배치 · epoch · 좌우 뒤집기 증강 · bf16 · 시드 · 이어 하기.
 val 은 epoch 마다 재서 찍기만 한다: 사진마다 역깊이에서 a · x + b 를 정답에 맞춘 뒤의 AbsRel (상대 깊이 모델 점검과 같은 식 — 고정한 공식 모델은 0.1267 이었다).
---pairs (팔 rtp): 스텝마다 쌍 배치 하나를 더 본다. 목표 = 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이, 같은 ssi_disp 에 큰 오차 20 % 버림 (PL_TRIM), 쓸 화소 = 라벨 0 초과 80 m 이하.
+--pairs (팔 rtp · rts): 스텝마다 쌍 배치 하나를 더 본다. 목표 = 미리 뽑아 둔 선생 (UniDepthV2) 의 깊이, 같은 ssi_disp 에 큰 오차 20 % 버림 (PL_TRIM), 쓸 화소 = 라벨 0 초과 80 m 이하.
   쌍은 train.py 의 ours · rtp · mtd 와 같다 (크기별 배치, 쌍 수에 비례한 뽑기). MS2 쪽 손실 · 스텝 수 · 학습률은 그대로이고 쌍 손실의 기울기를 더한다.
 
 결과 (--out): train_log.csv · val_log.csv · done.json. 체크포인트 (--ckpt): last.pt (이어 하기, 끝나면 지움) · rel.pt (가중치만 — train.py --arm rt --weights 로 넘긴다)
@@ -41,7 +41,7 @@ def main():
     ap.add_argument("--amp", type=int, default=1)
     ap.add_argument("--out", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--pairs", action="store_true", help="쌍 + 선생 라벨을 더한다 (팔 rtp)")
+    ap.add_argument("--pairs", action="store_true", help="쌍 + 선생 라벨을 더한다 (팔 rtp · rts)")
     ap.add_argument("--pair_bs", type=int, default=8)
     ap.add_argument("--pl_weight", type=float, default=1.0)
     ap.add_argument("--resume", action="store_true")

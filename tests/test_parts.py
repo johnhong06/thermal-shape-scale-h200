@@ -594,6 +594,9 @@ class Parts(unittest.TestCase):
         z.backward()
         self.assertEqual(float(z), 0.0)
         self.assertEqual(D.LABEL_GROUPS, (("kaist", "llvip", "tartan"), ("freiburg",)))
+        import train                                                           # rts (진단 팔): 두 단계 구조, 쌍은 1 단계에만 — 2 단계의 쌍 팔 목록에는 없다
+        self.assertIn("rts", train.ARMS)
+        self.assertNotIn("rts", train.LABEL_ARMS)
         import train_rel                                                       # 1 단계에 쌍 (rtp): 가짜 묶음의 쌍 라벨로 끝까지
         with tempfile.TemporaryDirectory() as t:
             argv = sys.argv

@@ -21,6 +21,7 @@
         손실 = SiLog (base 와 같음) + 0.5 × 의사 정답 (common.tr_pseudo) + 0.01 × 맵 매끄러움 (common.edge_smooth, A · B 각각). README '열화상 판 TR2M'.
   rt    tr 과 같은데, 고정하는 상대 깊이 모델이 공식 체크포인트가 아니라 먼저 MS2 열화상으로 미세조정한 것이다 (src/train_rel.py 가 만든 rel.pt 를 --weights 로).
   rtp   rt + 쌍 (README '본 실험 4'): 1 단계 (train_rel.py --pairs) 에 선생의 모양, 2 단계 (여기) 에 선생의 절대 깊이 — 스텝마다 쌍 배치 하나에 SiLog.
+  rts   rt + 쌍을 1 단계 (train_rel.py --pairs, 선생의 모양) 에만. 2 단계 (여기) 는 rt 와 똑같이 MS2 만 — 쌍의 절대 깊이를 뺐을 때를 보는 진단 팔 (README '본 실험 4' 의 '진단').
   mtd   base (한꺼번에 내는 구조, 전체 미세조정) + 쌍의 선생 절대 깊이에 SiLog. MonoTher-Depth 의 방식을 평가와 무관한 쌍으로 옮긴 비교 팔 (신뢰도 가중은 없음).
         rtp · mtd 의 쌍은 ours 와 같다 (KAIST · LLVIP · Freiburg · TartanRGBT, 선생 = UniDepthV2, 크기별 배치 · 쌍 수에 비례한 뽑기). 쓸 화소 = 라벨 0 초과 80 m 이하.
 
@@ -44,7 +45,7 @@ from common import (MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM, depth_metric
                     tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "mtd")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "mtd")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
@@ -124,7 +125,7 @@ def main():
     seed_all(a.seed)
     torch.backends.cudnn.benchmark = True                          # 입력 크기가 고정
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
-    sep, tr = a.arm in SEP, a.arm in ("tr", "rt", "rtp")
+    sep, tr = a.arm in SEP, a.arm in ("tr", "rt", "rtp", "rts")
     if tr:                                                         # 고정한 상대 깊이 모델 + 작은 모듈 — 모듈만 학습한다
         model = M.build_tr(a.encoder, a.weights).to(dev)
         groups = [{"params": list(model.scalemap.parameters()), "lr": a.lr * 10.0}]
