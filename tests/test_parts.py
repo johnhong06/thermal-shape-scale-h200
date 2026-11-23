@@ -612,6 +612,40 @@ class Parts(unittest.TestCase):
                 rows = list(csv.DictReader(f))
             self.assertTrue(rows and rows[0]["loss_pl"] != "")
 
+    def test_label_check(self):
+        import label_check as LC
+        k, f, t = LC.CAMS["kaist"], LC.CAMS["freiburg"], LC.CAMS["tartan"]
+        self.assertAlmostEqual(k[0], 722.9, delta=0.1)                   # 세로 화각 39° (640×512)
+        self.assertEqual(k[2:], (320.0, 256.0))
+        for got, want in zip(f, (466.96, 466.08, 303.84, 137.58)):       # 1920×650 의 값을 자르기 (307–1701) · 줄이기 (640×298) 에 맞춘 것
+            self.assertAlmostEqual(got, want, delta=0.02)
+        self.assertAlmostEqual(t[0], 421.23, delta=0.01)
+        self.assertIsNone(LC.CAMS["llvip"])
+        self.assertEqual(LC.kmat(k).tolist()[2], [0.0, 0.0, 1.0])
+        self.assertEqual(LC.pick(list(range(10)), 3), [0, 4, 9])
+        g = torch.Generator().manual_seed(1)
+        d1 = torch.rand(20, 30, generator=g) * 20 + 2
+        ok = torch.ones_like(d1, dtype=torch.bool)
+        a, b, sh = LC.ratio_stats(d1 * 1.5, d1, ok)                      # 배율만 다르면 비 1.5, 모양의 차 0
+        self.assertAlmostEqual(a / b, 1.5, places=5)
+        self.assertAlmostEqual(sh, 0.0, places=6)
+        self.assertIsNone(LC.ratio_stats(d1, d1, torch.zeros_like(ok)))
+        ls, ar = LC.scale_err(d1 * 1.25, d1)                             # 1.25 배 멀게 예측 → log 비 −0.223 (치우침 −) · AbsRel 0.25
+        self.assertAlmostEqual(ls, -0.2231, places=3)
+        self.assertAlmostEqual(ar, 0.25, places=5)
+        S = {"kaist": {"ratio_med": 1.40}, "freiburg": {"ratio_med": 1.05}, "tartan": {"ratio_med": 0.80},
+             "ms2_rgb": {"scale_free": {"abs_med": 0.080, "bias": -0.076}, "scale_cam": {"abs_med": 0.040, "bias": -0.01}}}
+        V, L = LC.verdicts(S)
+        self.assertEqual(V, {"kaist": "멀게 부풂", "freiburg": "차이 작음", "tartan": "가깝게 쏠림", "ms2_rgb": "바로잡음"})
+        self.assertEqual(len(L), 2)
+        S["ms2_rgb"]["scale_cam"]["abs_med"] = 0.085
+        self.assertEqual(LC.verdicts(S)[0]["ms2_rgb"], "차이 없음")
+        rows = [{"fx_pred": 800.0, "med_free": 15.0, "med_cam": 10.0, "ratio": 1.5, "shape_diff": 0.02}] * 3
+        s_, line = LC.summarize("kaist", rows, (512, 640))
+        self.assertAlmostEqual(s_["ratio_med"], 1.5)
+        self.assertIn("640×512", line)
+        self.assertIn("실제의 1.11 배", line)
+
     def test_rel_check(self):
         import rel_check as RC
         pick, ok = RC.verdict({"vitl": {"rgb": 0.10, "rgb_low": 0.15, "thr": 0.16}, "vits": {"rgb": 0.10, "rgb_low": 0.18, "thr": 0.21}})   # 견주는 것은 같은 높이의 RGB

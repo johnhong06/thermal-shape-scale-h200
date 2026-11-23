@@ -10,6 +10,8 @@
 #                                         #   KIND=smoke 면 16 장짜리 작은 묶음으로. 표와 판정이 화면 끝에 나온다
 #   bash run.sh relcheck                  # 상대 깊이 모델 점검 (학습 없음, README '열화상 판 TR2M' 단계 1): Depth Anything V2 상대 깊이 ViT-L · ViT-S 를 고정한 채
 #                                         #   MS2 val 의 RGB · 열화상에서 모양 오차를 잰다. KIND=smoke 면 작은 묶음으로
+#   bash run.sh labelcheck [LIMIT=N]      # 선생 라벨 점검 (학습 없음, README '라벨 점검'): 쌍의 RGB 에 UniDepthV2 를 카메라 없이 · 실제 카메라 값을 주고 돌려
+#                                         #   라벨의 절대 깊이가 얼마나 달라지는지 본다 (세트마다 LIMIT 장, 기본 1000). MS2 의 RGB 에서는 정답과 견준다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh setup [DRY_RUN=1] | data  # 한 단계만 (작업끼리 파일이 안 이어지므로 data 는 setup 도 먼저 한다)
 # KEY=값 (이슈 한 줄 명령에는 환경 변수를 못 넣으므로 인자로):
 #   ARMS=base,sep,ours   돌릴 팔 (쉼표, 안 주면 이 셋). base = 기준선 · sep = 모양 + 스케일 학생을 MS2 만으로 ·
@@ -39,7 +41,7 @@ cd "$(dirname "$0")" || exit 1
 REPO=$PWD
 MODE=${1:-}
 [ $# -gt 0 ] && shift
-MODES="check setup data smoke all eval teacher relcheck"
+MODES="check setup data smoke all eval teacher relcheck labelcheck"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
 KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
@@ -152,7 +154,7 @@ run_step() {  # 이름 로그 보이기(show|quiet) 명령… → 종료 코드 
     n=$(wc -l < "$log")
     if [ "$n" -gt "$seen" ]; then
       new=$(tail -n "+$((seen + 1))" "$log" | head -n $((n - seen))); seen=$n
-      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|판정|비교|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
+      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|labelcheck|판정|비교|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
     fi
     if [ $((t - lastshow)) -ge "$PROGRESS_SEC" ]; then echo "[$name] $(date +%H:%M) 진행 중 $((t / 60)) 분 · 로그 변화 없음 $((idle / 60)) 분"; lastshow=$t; fi
     if [ "$STOP" = 1 ]; then rc=130; break; fi
@@ -202,7 +204,7 @@ mkenv_body() {
 }
 TPY=""
 # UniDepthV2 가 필요한가: 선생 점검, 그리고 팔 ours · rtp · rts · mtd 를 학습하는 작업 (선생 라벨을 뽑는다). 그때는 학습 환경 + UniDepthV2 가 쓰는 꾸러미 (envs/teacher.txt, torch 판은 같다)
-NEED_UD=0; [ "$MODE" = teacher ] && NEED_UD=1
+NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ]; } && NEED_UD=1
 case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*|smoke:*,rtp,*|all:*,rtp,*|smoke:*,rts,*|all:*,rts,*|smoke:*,mtd,*|all:*,mtd,*) NEED_UD=1;; esac   # 선생 라벨을 쓰는 팔
 ENVNAME=train; [ $NEED_UD = 1 ] && ENVNAME=teacher
 setup_env() {
@@ -325,7 +327,7 @@ os.replace(dst + ".tmp", dst)
 print(f"[zip] results.zip — 파일 {len(items)} 개 (체크포인트 {len(cks)}), {os.path.getsize(dst) / 2**20:.1f} MiB")
 PY
 }
-report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] && [ "$MODE" != relcheck ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
+report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] && [ "$MODE" != relcheck ] && [ "$MODE" != labelcheck ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
 fail() { echo "!!! [$MODE] $1"; report; zip_results; exit 1; }
 
 case "$MODE" in
@@ -364,6 +366,17 @@ case "$MODE" in
     if [ "$ENC" = vitl ]; then rm=(--models vitl,vits --weights_l "$TD_DAV2" --weights_s "$TD_DAV2S"); else rm=(--models vits); fi   # 로컬 흐름 시험은 작은 모델을 무작위 초기화로
     run_step "상대 깊이 점검" "$LOGS/relcheck.log" show "$TPY" -I -B -u src/rel_check.py --data "$WORK/data_rel" --out "$OUTJ/relcheck" "${rm[@]}" \
       --limit "$LIMIT" --bs "$BS" --workers "$WORKERS" || fail "상대 깊이 점검 실패"
+    zip_results;;
+  labelcheck)
+    setup_all || fail "준비 실패"
+    lk=pairs_kaist.tar,pairs_llvip.tar,pairs_freiburg.tar,pairs_tartan.tar,ms2_rgb_val.tar; [ "$KIND" = smoke ] && lk=smoke.tar,smoke_teacher.tar   # 쌍 넷 + MS2 val 의 RGB · 정답
+    s=(--search); [ -d "$APP/data" ] && s+=("$APP/data"); [ -n "$DATA_DIR" ] && s+=("$DATA_DIR")
+    WATCH="$WORK/dl/*.part" run_step data "$LOGS/data.log" show "$SYSPY" -I -B -u setup/get_data.py --kind all --only "$lk" --dest "$WORK/data_lc" --dl "$WORK/dl" \
+      ${LINKS:+--links "$LINKS"} "${s[@]}" || fail "데이터 실패"
+    off=(env); [ "$ENC" = vitl ] || off=(env -u HF_HUB_OFFLINE)   # 작은 인코더 (로컬 흐름 시험) 의 UniDepthV2 는 목록에 없어 그때 받는다
+    ll=$LIMIT; [ "$ll" = 0 ] && ll=1000
+    run_step "라벨 점검" "$LOGS/labelcheck.log" show "${off[@]}" "$TPY" -I -B -u src/label_check.py --data "$WORK/data_lc" --out "$OUTJ/labelcheck" \
+      --encoder "$ENC" --limit "$ll" --bs "$PAIR_BS" --workers "$WORKERS" || fail "라벨 점검 실패"
     zip_results;;
   eval)
     src=$OUTROOT/$FROM/ckpt

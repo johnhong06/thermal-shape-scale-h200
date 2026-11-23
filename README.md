@@ -94,6 +94,24 @@
 - **MS2의 모양은 1단계의 쌍에서 깎인다.** 1단계 val은 0.0648로 `rtp`(0.0654)와 같고 `rt`(0.0613)보다 나쁘다.
 - `rts` − `base`(본 실험 4의 시드 0): MS2 +0.0042, ViViD 밤 −0.0204, FIReStereo −0.2115, ViViD 실내 −0.5349, STheReO +0.0380.
 
+### 라벨 점검 (학습 없음, 읽는 법은 2026-11-23 고정 — 결과를 보기 전)
+
+쌍의 선생 라벨은 UniDepthV2에 카메라 정보를 주지 않고 뽑았다. 선생이 쌍의 카메라를 잘못 짐작해 절대 깊이가 한쪽으로 쏠렸는지 본다. 세트마다 고르게 뽑은 1,000장에 선생을 두 번 돌린다(카메라 없이 · 실제 카메라 값을 주고).
+
+| 세트 | 실제 초점 (px) | 선생이 짐작한 초점 | 깊이 비 (카메라 없이 / 주고) | 읽기 |
+|---|---|---|---|---|
+| KAIST (640×512) | 723 | — | — | — |
+| Freiburg (640×298) | 467 | — | — | — |
+| TartanRGBT (640×512) | 421 | — | — | — |
+| LLVIP (640×512) | 모름 | — | 잴 수 없음 | |
+| MS2 RGB (1224×384, 정답 있음) | 765 | — | 정답 대비 스케일 오차 — → — | — |
+
+- 사진별 깊이 비의 중앙값이 1.15 이상이면 '멀게 부풂', 0.87 이하면 '가깝게 쏠림', 사이면 '차이 작음'이다.
+- MS2 RGB에서는 정답과 견준다. 카메라 값을 줬을 때 스케일 오차 중앙값이 0.01 넘게 줄면 '바로잡음', 늘면 '나빠짐'이다.
+- 다음 일도 미리 적는다. 주행 쌍(KAIST · Freiburg)에 '멀게 부풂'이 있고 MS2가 '나빠짐'이 아니면 라벨을 카메라 값으로 다시 뽑는다. 셋 다 '차이 작음'이면 라벨의 스케일은 원인이 아닌 것으로 본다. MS2가 '나빠짐'이면 카메라 값을 주는 길을 믿지 않는다.
+- 카메라 값의 근거: KAIST는 논문의 세로 화각 39°, Freiburg는 저자 코드 저장소의 보정값을 우리 묶음의 자르기 · 줄이기에 맞춘 것(공개 영상이 왜곡을 편 것인지는 모른다), TartanRGBT는 공개 저장소의 보정 파일, MS2는 calib.npy다.
+- 한계: 카메라 값을 준 쪽이 정답은 아니다. 쌍에는 깊이 정답이 없어 MS2 한 곳에서만 정답과 견준다.
+
 ## 팔
 
 | 팔 | 내용 |
@@ -127,9 +145,10 @@ bash run.sh check LINKS=<값>                               # 1–2분, 환경 �
 bash run.sh smoke ARMS=base,mtd,rt,rtp LINKS=<값>          # 작은 묶음으로 끝까지 (GPU 할당 7, 8분)
 bash run.sh all ARMS=base,mtd,rt,rtp SEEDS=0 LINKS=<값>    # 본 실험 4 (12–13시간)
 bash run.sh all ARMS=rts SEEDS=0 LINKS=<값>                # 본 실험 4의 진단 (4.5–5시간)
+bash run.sh labelcheck LINKS=<값>                          # 라벨 점검 (학습 없음, 10–15분)
 ```
 
-결과 표와 판정은 화면 끝에 찍히고(`[표1]`–`[표6]`, `[판정]`, `[비교]`), 결과 파일은 `/app/output/<작업>/results.zip`이다. 나머지 모드(`teacher` · `relcheck` · `eval`)와 인자는 `run.sh` 맨 위에 있다. 로컬 시험은 `tests/run_local.sh`(CPU, 메모리 3 GB 안)다.
+결과 표와 판정은 화면 끝에 찍히고(`[표1]`–`[표6]`, `[판정]`, `[비교]`), 결과 파일은 `/app/output/<작업>/results.zip`이다. 화면 줄 머리는 라벨 점검만 `[labelcheck]`이다. 나머지 모드(`teacher` · `relcheck` · `eval`)와 인자는 `run.sh` 맨 위에 있다. 로컬 시험은 `tests/run_local.sh`(CPU, 메모리 3 GB 안)다.
 
 ## 데이터
 
@@ -162,8 +181,8 @@ bash run.sh all ARMS=rts SEEDS=0 LINKS=<값>                # 본 실험 4의 �
 ## 구성
 
 ```
-run.sh    진입점 (check · smoke · all · teacher · relcheck · eval)
-src/      학습 (train · train_rel) · 평가 (evaluate) · 표와 판정 (report) · 선생 라벨 (labels) · 점검 (teacher_check · rel_check)
+run.sh    진입점 (check · smoke · all · labelcheck · teacher · relcheck · eval)
+src/      학습 (train · train_rel) · 평가 (evaluate) · 표와 판정 (report) · 선생 라벨 (labels) · 점검 (teacher_check · rel_check · label_check)
 setup/    공식 코드 · 가중치 · 데이터 받기와 확인      envs/  고정한 패키지 판      splits/  MS2 공식 분할
 tests/    부품 시험 · 로컬 실행                         docs/  상세 기록 · 관리자 안내
 ```
