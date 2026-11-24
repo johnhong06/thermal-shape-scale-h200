@@ -35,14 +35,16 @@ def probe(name, url, headers=None, expect=None):
 
 
 def probe_drive(name, fid, size):
-    """작업이 받는 길 그대로 (확인 페이지가 오면 양식대로 한 번 더) 첫 바이트만 요청해 본다."""
+    """작업이 받는 꼴 그대로 (파일 전체 · 확인 페이지가 오면 양식대로 한 번 더) 요청하고 머리만 본 뒤 끊는다.
+    첫 바이트만 묻으면 받기 한도에 걸려 있어도 통과한다 (2026-11-24 에 확인) — 그래서 전체를 요청한다."""
     import get_data
     try:
-        r, title = get_data.request(fid, "bytes=0-0", timeout=20)
+        r, title = get_data.request(fid, "bytes=0-", timeout=20)
     except Exception as ex:
         return f"  접속 {name}: 실패 ({type(ex).__name__})"
     if r is None:
-        return f"  접속 {name}: !!! 파일이 아니라 웹 페이지 '{title}' (받기 막힘 · 공유 꺼짐)"
+        why = "받기 한도 — 길면 하루 뒤에 풀린다" if get_data.quota(title) else "받기 막힘 · 공유 꺼짐"
+        return f"  접속 {name}: !!! 파일이 아니라 웹 페이지 '{title}' ({why})"
     with r:
         cr = r.headers.get("Content-Range") or ""
         return f"  접속 {name}: OK ({r.status})" + (" — 크기 맞음" if cr.endswith("/" + str(size)) else " — 크기 확인 안 됨")

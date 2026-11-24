@@ -21,7 +21,8 @@ CONFIRM = ('<html><head><title>Google Drive - Virus scan warning</title></head><
            '<form id="download-form" action="{base}/download" method="get"><input type="submit" id="uc-download-link" value="Download anyway"/>'
            '<input type="hidden" name="id" value="{fid}"><input type="hidden" name="export" value="download">'
            '<input type="hidden" name="confirm" value="t"><input type="hidden" name="uuid" value="0f1e2d3c-4b5a-6978-8695-a4b3c2d1e0f9"></form></body></html>')
-QUOTA = "<html><head><title>Google Drive - Quota exceeded {fid}</title></head><body>Too many users have viewed or downloaded this file recently.</body></html>"
+QUOTA = "<html><head><title>Google Drive - Quota exceeded</title></head><body>Too many users have viewed or downloaded this file recently.</body></html>"
+BUSY = "<html><head><title>Sorry, try again later {fid}</title></head><body>…</body></html>"     # 한도가 아닌 웹 페이지 (제목에 ID 가 섞인 경우)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -33,9 +34,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
         sv.seen.append((q, self.headers.get("Range")))
         kind = sv.plan.pop(0) if sv.plan else "file"
-        if kind in ("confirm", "quota", "other"):
+        if kind in ("confirm", "quota", "busy", "other"):
             fid = "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ" if kind == "other" else FID
-            body = (QUOTA if kind == "quota" else CONFIRM).format(base=sv.base, fid=fid).encode()
+            body = {"quota": QUOTA, "busy": BUSY}.get(kind, CONFIRM).format(base=sv.base, fid=fid).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
         else:
@@ -101,28 +102,41 @@ class Download(unittest.TestCase):
         self.assertEqual(seen[1][1], "bytes=0-")                                           # 양식 요청에도 이어받기 범위를 준다
 
     def test_page_then_file(self):
-        ok, got, out, seen = self.run_dl(["quota"], [0, 0])                                # 웹 페이지 한 번 → 기다렸다 다시 → 파일
+        ok, got, out, seen = self.run_dl(["busy"], [0, 0])                                 # 웹 페이지 한 번 → 기다렸다 다시 → 파일
         self.assertTrue(ok and got == DATA)
         self.assertEqual(len(seen), 2)
-        self.assertIn("Google Drive - Quota exceeded …", out)
+        self.assertIn("'Sorry, try again later …'", out)                                   # 제목의 ID 꼴은 가린다
         self.assertIn("뒤 다시 받아 봄", out)
         self.assertEqual(G.WAITS, [0])                                                     # 기다린 만큼 줄어든다 (작업 하나에서 합쳐서 센다)
 
     def test_page_gives_up(self):
-        ok, got, out, seen = self.run_dl(["quota"] * 9, [0, 0])                            # 두 번 기다리고 그만둔다
+        ok, got, out, seen = self.run_dl(["busy"] * 9, [0, 0])                             # 두 번 기다리고 그만둔다
         self.assertFalse(ok)
         self.assertIsNone(got)
         self.assertEqual(len(seen), 3)
-        self.assertIn("!!! [data] x.tar: Drive 가 파일 대신 웹 페이지를 줌 — 'Google Drive - Quota exceeded …'", out)
-        ok, got, out, seen = self.run_dl(["quota"] * 9, [])                                # 남은 기다림이 없으면 바로
+        self.assertIn("!!! [data] x.tar: Drive 가 파일 대신 웹 페이지를 줌 — 'Sorry, try again later …'", out)
+        ok, got, out, seen = self.run_dl(["busy"] * 9, [])                                 # 남은 기다림이 없으면 바로
         self.assertFalse(ok)
         self.assertEqual(len(seen), 1)
 
-    def test_form_not_followed(self):
-        ok, got, out, seen = self.run_dl(["other"] + ["quota"] * 9, [])                    # 양식이 다른 파일을 가리키면 따라가지 않는다
+    def test_quota_stops_at_once(self):
+        ok, got, out, seen = self.run_dl(["quota"] * 9, [0, 0])                            # 받기 한도는 기다리지 않는다
         self.assertFalse(ok)
         self.assertEqual(len(seen), 1)
-        ok, got, out, seen = self.run_dl(["confirm", "confirm"] + ["quota"] * 9, [])       # 양식은 한 번만 따라간다
+        self.assertEqual(G.WAITS, [0, 0])
+        self.assertIn("!!! [data] x.tar: Drive 받기 한도 ('Google Drive - Quota exceeded')", out)
+
+    def test_blocked(self):
+        self.sv.plan[:], self.sv.seen[:] = ["file", "quota", "busy", "confirm", "file", "confirm", "quota"], []
+        names = ["a.tar", "b.tar", "c.tar", "d.tar", "e.tar"]                              # 파일 · 한도 · 다른 페이지 · 확인 뒤 파일 · 확인 뒤 한도
+        self.assertEqual(G.blocked({n: FID for n in names}, names), ["b.tar", "e.tar"])
+        self.assertEqual([x[1] for x in self.sv.seen], ["bytes=0-"] * 7)                   # 작업이 받는 꼴로 묻는다 (첫 바이트만 물으면 한도가 안 보인다)
+
+    def test_form_not_followed(self):
+        ok, got, out, seen = self.run_dl(["other"] + ["busy"] * 9, [])                     # 양식이 다른 파일을 가리키면 따라가지 않는다
+        self.assertFalse(ok)
+        self.assertEqual(len(seen), 1)
+        ok, got, out, seen = self.run_dl(["confirm", "confirm"] + ["busy"] * 9, [])        # 양식은 한 번만 따라간다
         self.assertFalse(ok)
         self.assertEqual(len(seen), 2)
         self.assertIn("Virus scan warning", out)
@@ -133,7 +147,9 @@ class Download(unittest.TestCase):
         self.assertEqual(t, "Google Drive - Virus scan warning")
         self.assertEqual(u, f"{base}/download?id={FID}&export=download&confirm=t&uuid=0f1e2d3c-4b5a-6978-8695-a4b3c2d1e0f9")
         self.assertEqual(G.page(io.BytesIO(CONFIRM.format(base="https://example.com", fid=FID).encode()))[1], None)   # Drive 가 아닌 곳의 양식
-        self.assertEqual(G.page(io.BytesIO(QUOTA.format(fid=FID).encode())), ("Google Drive - Quota exceeded …", None))
+        self.assertEqual(G.page(io.BytesIO(QUOTA.encode())), ("Google Drive - Quota exceeded", None))
+        self.assertEqual(G.page(io.BytesIO(BUSY.format(fid=FID).encode())), ("Sorry, try again later …", None))
+        self.assertTrue(G.quota("Google Drive - Quota exceeded") and not G.quota("Google Drive - Virus scan warning") and not G.quota(None))
         self.assertEqual(G.page(io.BytesIO(b"<html>no title</html>")), ("제목 없음", None))
         self.assertLessEqual(len(G.page(io.BytesIO(b"<title>" + b"ab " * 200 + b"</title>"))[0]), 60)
 

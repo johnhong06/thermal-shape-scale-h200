@@ -4,7 +4,10 @@
   1. --search 폴더들 (H200 = /app/data, 로컬 시험 = DATA_DIR) 아래 5 단계 안에서 크기가 꼭 맞는 파일 — 올려 둔 사본 (이름 · 폴더는 상관없다)
   2. 없으면 --links 로 받은 목록의 Google Drive 파일에서 받는다 (이어받기, 3 번까지)
      큰 파일에 Drive 가 확인 페이지 ('바이러스 검사를 못 함') 를 주면 그 양식대로 한 번 더 요청한다 (브라우저의 '무시하고 다운로드').
-     그래도 웹 페이지가 오면 (받기 한도 등) 제목을 찍고 5 분 · 10 분 기다렸다가 다시 받아 본다 — 작업 하나에서 모두 합쳐 두 번까지. 한도를 돌아가지는 않는다.
+     그래도 웹 페이지가 오면 제목을 찍고 5 분 · 10 분 기다렸다가 다시 받아 본다 — 작업 하나에서 모두 합쳐 두 번까지.
+     받기 한도 ('Quota exceeded') 는 기다려도 곧 풀리지 않으므로 (길면 하루) 바로 끝낸다. 받기 전에 받을 묶음을 모두 먼저 물어보고,
+     하나라도 한도에 걸려 있으면 아무것도 받지 않는다 (몇 개만 받고 실패하면 한도만 더 쓴다). 한도를 돌아가지는 않는다.
+     한도는 파일 전체를 요청할 때만 보인다 — 첫 바이트만 묻는 요청은 한도에 걸려 있어도 통과한다 (2026-11-24 에 확인).
      --links = 작은 목록 파일 (JSON: {묶음 이름: Drive 파일 ID}) 의 Drive 파일 ID. run.sh 의 LINKS= 인자로 온다 (실행 명령에만 적는 값).
 어느 쪽이든 sha256 이 data.json 과 같아야 쓴다. 풀 때는 이름이 정해진 꼴인 PNG 만 (정규 파일만, 경로는 우리가 다시 만든다).
 끝나면 PNG 개수를 확인하고 <dest>/.done 에 '<종류> <해시>' 를 남긴다 (다시 부르면 건너뜀). 받은 tar 는 풀고 나서 지운다.
@@ -88,6 +91,25 @@ def request(fid, rng, timeout=120):
     return None, "?"
 
 
+def quota(title):
+    return "quota" in (title or "").lower()
+
+
+def blocked(links, names):
+    """받기 한도에 걸린 묶음 이름들. 작업이 받는 꼴 (파일 전체) 로 요청하고 머리만 본 뒤 끊는다. 접속 문제 · 다른 웹 페이지는 받을 때 다시 본다."""
+    out = []
+    for name in names:
+        try:
+            r, title = request(links[name], "bytes=0-", timeout=60)
+        except Exception:
+            continue
+        if r is not None:
+            r.close()
+        elif quota(title):
+            out.append(name)
+    return out
+
+
 def read_links(fid):
     """목록 파일 (JSON, 수 KB) 을 받아 {묶음 이름: 파일 ID}. 주소 · ID 는 찍지 않는다."""
     if not ID.match(fid or ""):
@@ -112,6 +134,9 @@ def download(name, size, fid, dst):
         try:
             r, title = request(fid, f"bytes={have}-")
             if r is None:                                         # 파일 대신 웹 페이지 — 기다렸다 다시 (작업 하나에서 WAITS 만큼만)
+                if quota(title):
+                    print(f"!!! [data] {name}: Drive 받기 한도 ('{title}') — 기다려도 곧 풀리지 않는다 (길면 하루). 나중에 같은 명령을 다시")
+                    return False
                 if not WAITS:
                     print(f"!!! [data] {name}: Drive 가 파일 대신 웹 페이지를 줌 — '{title}' (받기 한도 · 공유 꺼짐)")
                     return False
@@ -217,6 +242,11 @@ def main():
         no = [n for n in lack if n not in links]
         if no:
             print(f"!!! [data] 목록에 없는 묶음: {', '.join(no)}")
+            return 1
+        bl = blocked(links, lack)
+        if bl:
+            print(f"!!! [data] Drive 받기 한도 ('Quota exceeded') 에 걸린 묶음 {len(bl)} / {len(lack)} 개 — 아무것도 받지 않고 끝낸다 (길면 하루 뒤에 풀린다. 나중에 같은 명령을 다시)")
+            print(f"!!! [data] 걸린 묶음: {', '.join(bl)}"[:390])
             return 1
     shutil.rmtree(a.dest, ignore_errors=True)
     os.makedirs(a.dest)
