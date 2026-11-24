@@ -1,5 +1,6 @@
-"""setup/get_data.py 의 Drive 받기 — 이 PC 안의 작은 서버로 (표준 라이브러리만, 바깥 접속 없음).
-확인 페이지의 양식을 따라가는지 · 웹 페이지가 오면 제목을 찍고 정해진 만큼만 기다렸다 다시 받는지 · 이어받기 · 화면에 ID 를 안 찍는지.
+"""setup/get_data.py 의 받기 — 이 PC 안의 작은 서버로 (표준 라이브러리만, 바깥 접속 없음).
+Drive: 확인 페이지의 양식을 따라가는지 · 웹 페이지가 오면 제목을 찍고 정해진 만큼만 기다렸다 다시 받는지 · 한도면 바로 끝내는지 · 이어받기 · 화면에 ID 를 안 찍는지.
+Hugging Face 비공개 저장소: 토큰을 그 호스트에만 보내는지 (다른 호스트로 넘겨질 때 떼어 냄) · 이어받기 · 토큰 · 이름이 틀릴 때 · 받기 전 확인 · 화면에 저장소 이름 · 토큰을 안 찍는지.
 사용: python3 -I -B tests/test_get_data.py
 """
 import contextlib
@@ -152,6 +153,151 @@ class Download(unittest.TestCase):
         self.assertTrue(G.quota("Google Drive - Quota exceeded") and not G.quota("Google Drive - Virus scan warning") and not G.quota(None))
         self.assertEqual(G.page(io.BytesIO(b"<html>no title</html>")), ("제목 없음", None))
         self.assertLessEqual(len(G.page(io.BytesIO(b"<title>" + b"ab " * 200 + b"</title>"))[0]), 60)
+
+
+REPO, TOKEN = "some-user/some-data", "hf_" + "Ab1" * 11                                    # 지어낸 값
+
+
+class HubHandler(http.server.BaseHTTPRequestHandler):
+    """가짜 huggingface.co: 토큰을 확인하고 다른 호스트 (CDN) 의 서명된 주소로 넘긴다. rel.tar 는 같은 호스트 안에서 넘긴다."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        sv = self.server
+        auth = self.headers.get("Authorization")
+        sv.seen.append((self.path, auth, self.headers.get("Range")))
+        pre = f"/datasets/{REPO}/resolve/main/"
+        code, loc = 404, None
+        if auth != f"Bearer {TOKEN}":
+            code = 401
+        elif self.path == "/same/rel.tar":
+            code, loc = 302, f"{sv.cdn}/blob/rel.tar?sig=1"
+        elif self.path.startswith(pre) and self.path[len(pre):] in sv.names:
+            name = self.path[len(pre):]
+            code, loc = 302, ("/same/rel.tar" if name == "rel.tar" else f"{sv.cdn}/blob/{name}?sig=1")
+        self.send_response(code)
+        if loc:
+            self.send_header("Location", loc)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class CdnHandler(http.server.BaseHTTPRequestHandler):
+    """가짜 저장소 호스트: 서명된 주소에 토큰이 붙어 오면 거절한다."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        sv = self.server
+        sv.seen.append((self.path, self.headers.get("Authorization"), self.headers.get("Range")))
+        if self.headers.get("Authorization"):
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        rng = self.headers.get("Range") or "bytes=0-"
+        a, b = rng[6:].split("-")
+        a = int(a)
+        b = int(b) if b else len(DATA) - 1
+        body = DATA[a:b + 1]
+        self.send_response(206)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Range", f"bytes {a}-{b}/{len(DATA)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class Hub(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.hub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HubHandler)
+        cls.cdn = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CdnHandler)
+        cls.hub.cdn = f"http://127.0.0.1:{cls.cdn.server_address[1]}"
+        cls.hub.names, cls.hub.seen, cls.cdn.seen = {"x.tar", "y.tar", "rel.tar"}, [], []
+        for sv in (cls.hub, cls.cdn):
+            threading.Thread(target=sv.serve_forever, daemon=True).start()
+        cls.keep = G.HF_BASE
+        G.HF_BASE = f"http://127.0.0.1:{cls.hub.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        G.HF_BASE = cls.keep
+        for sv in (cls.hub, cls.cdn):
+            sv.shutdown()
+            sv.server_close()
+
+    def run_dl(self, name, hf, have=0):
+        self.hub.seen[:], self.cdn.seen[:] = [], []
+        with tempfile.TemporaryDirectory() as t:
+            dst = os.path.join(t, "dl", name)
+            if have:
+                os.makedirs(os.path.dirname(dst))
+                with open(dst + ".part", "wb") as fh:
+                    fh.write(DATA[:have])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ok = G.download(name, len(DATA), None, dst, hf)
+            got = None
+            if os.path.exists(dst):
+                with open(dst, "rb") as fh:
+                    got = fh.read()
+        for secret in (TOKEN, REPO, hf[1]):                                                 # 화면에 저장소 이름 · 토큰을 안 찍는다
+            self.assertNotIn(secret, out.getvalue())
+        return ok, got, out.getvalue()
+
+    def test_download_and_resume(self):
+        ok, got, out = self.run_dl("x.tar", (REPO, TOKEN))
+        self.assertTrue(ok and got == DATA and out == "")
+        self.assertEqual(self.hub.seen, [(f"/datasets/{REPO}/resolve/main/x.tar", f"Bearer {TOKEN}", "bytes=0-")])
+        self.assertEqual(self.cdn.seen, [("/blob/x.tar?sig=1", None, "bytes=0-")])         # 다른 호스트에는 토큰을 안 보낸다 · 범위는 그대로 간다
+        ok, got, out = self.run_dl("x.tar", (REPO, TOKEN), have=1000)
+        self.assertTrue(ok and got == DATA)
+        self.assertEqual(self.cdn.seen[0][2], "bytes=1000-")
+
+    def test_same_host_redirect_keeps_token(self):
+        ok, got, out = self.run_dl("rel.tar", (REPO, TOKEN))                                # 같은 호스트 안에서 넘겨질 때는 토큰을 그대로
+        self.assertTrue(ok and got == DATA)
+        self.assertEqual([x[1] for x in self.hub.seen], [f"Bearer {TOKEN}"] * 2)
+        self.assertEqual(self.cdn.seen[0][1], None)
+
+    def test_bad_token_or_name(self):
+        ok, got, out = self.run_dl("x.tar", (REPO, "hf_" + "Zz9" * 11))                     # 틀린 토큰 — 다시 해 보지 않고 바로 끝
+        self.assertFalse(ok)
+        self.assertEqual(len(self.hub.seen), 1)
+        self.assertIn("!!! [data] x.tar: Hugging Face 에서 받지 못함 — 토큰이 틀림 (401)", out)
+        ok, got, out = self.run_dl("nope.tar", (REPO, TOKEN))
+        self.assertFalse(ok)
+        self.assertIn("(404)", out)
+
+    def test_missing(self):
+        bad = G.hf_missing((REPO, TOKEN), {"x.tar": len(DATA), "y.tar": len(DATA) + 1, "nope.tar": 5})
+        self.assertEqual([n for n, _ in bad], ["y.tar", "nope.tar"])
+        self.assertEqual(bad[0][1], "크기가 목록과 다름")
+        self.assertIn("(404)", bad[1][1])
+        self.assertEqual(G.hf_missing((REPO, TOKEN), {"x.tar": len(DATA)}), [])
+        self.assertEqual([w for _, w in G.hf_missing((REPO, "hf_" + "Zz9" * 11), {"x.tar": len(DATA)})], ["토큰이 틀림 (401)"])
+
+    def test_env(self):
+        keep = {k: os.environ.pop(k, None) for k in ("TD_HF_REPO", "TD_HF_TOKEN")}
+        try:
+            self.assertIsNone(G.hf_env())
+            os.environ.update(TD_HF_REPO=REPO, TD_HF_TOKEN=TOKEN)
+            self.assertEqual(G.hf_env(), (REPO, TOKEN))
+            for repo, token in ((REPO, ""), ("", TOKEN), ("no-slash", TOKEN), (REPO, "token"), (REPO + "/x", TOKEN), ("../x/y", TOKEN)):
+                os.environ.update(TD_HF_REPO=repo, TD_HF_TOKEN=token)
+                with self.assertRaises(ValueError) as cm:
+                    G.hf_env()
+                self.assertNotIn(TOKEN, str(cm.exception))                                 # 값은 메시지에 안 넣는다
+                self.assertNotIn(REPO, str(cm.exception))
+        finally:
+            for k, v in keep.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

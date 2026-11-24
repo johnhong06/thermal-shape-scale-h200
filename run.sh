@@ -33,13 +33,15 @@
 #   STALL_MIN=40 (로그가 이만큼 그대로면 멈춘 것으로 보고 끔)   PROGRESS_SEC=1800   RETRY=2 (학습이 죽으면 last.pt 에서 다시)
 #   LINKS=<Drive 파일 ID> 데이터 묶음을 받을 곳의 목록 파일. 묶음과 받는 주소는 저장소에 없다 (다시 배포하면 안 되는 데이터) — 이 값은 실행 명령에만 적는다.
 #         /app/data 에 묶음이 올라가 있으면 없어도 된다.
+#   DATA_REPO=<계정>/<저장소> DATA_TOKEN=<읽기 전용 토큰>   묶음을 Hugging Face 의 **비공개** 데이터 저장소에서 받는다 (LINKS 대신 — Drive 의 받기 한도 때문에 옮김).
+#         둘 다 실행 명령에만 적는다. 토큰은 그 저장소 하나만 읽는 것으로 만들고 실험이 끝나면 지운다. 화면 · 로그에 찍지 않는다.
 #   JOB=<결과 폴더 이름>   DRY_RUN=1 (setup: 큰 것을 받지 않음)
 #   (로컬 시험) WORK=<작업 폴더>  PY=<쓸 파이썬>  APP_ROOT=<가짜 /app>  DATA_DIR=<묶음이 있는 폴더>  HF_DIR=<HF 캐시>
 #               ENC=vits (작은 인코더를 무작위 초기화로 — 메모리 1 GB 남짓으로 모든 단계의 흐름만 본다. 수치는 뜻이 없다)
 # 경로 (H200): /app/data 읽기 전용 (올려 둔 묶음이 있으면 그것을 쓴다) · /app/scratch/thermal = 작업 폴더 (환경 · 캐시 · 코드 · 데이터 · 체크포인트, 작업마다 비워짐)
 #   /app/output/<작업>/ = 결과만: logs/ · runs/ · summary/ · results.zip
 # 화면 출력 = 짧은 요약 (앞 150 줄 + 끝 50 줄, 65,000 자 안) — 결과 표가 늘 끝에 오게 한다. 이름과 숫자만 찍는다 (이슈 댓글은 공개).
-#   LINKS 값 · Drive 주소 · 파일 ID 는 화면에 찍지 않는다. 토큰은 쓰지 않는다.
+#   LINKS 값 · Drive 주소 · 파일 ID · DATA_REPO · DATA_TOKEN 은 화면에 찍지 않는다. 토큰은 DATA_TOKEN (데이터 저장소 읽기 전용) 말고는 쓰지 않는다.
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 REPO=$PWD
@@ -47,7 +49,7 @@ MODE=${1:-}
 [ $# -gt 0 ] && shift
 MODES="check setup data smoke all eval teacher relcheck labelcheck"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
-KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT"
+KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT DATA_REPO DATA_TOKEN"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
 for a in "$@"; do
   k=${a%%=*}
@@ -58,6 +60,8 @@ INT='^[0-9]+$'; NAME='^[A-Za-z0-9_.+-]+$'; LIST='^[a-z0-9,]*$'
 chk() { [ -z "${!1:-}" ] || [[ ${!1} =~ $2 ]] || { echo "!!! $1=${!1} — 형식이 맞지 않음"; exit 2; }; }
 chk ARMS "$LIST"; chk SEEDS "$LIST"; chk EPOCHS "$INT"; chk BS "$INT"; chk PAIR_BS "$INT"; chk LIMIT "$INT"; chk WORKERS "$INT"; chk STALL_MIN "$INT"; chk PROGRESS_SEC "$INT"; chk RETRY "$INT"; chk JOB "$NAME"
 [ -z "${LINKS:-}" ] || [[ $LINKS =~ ^[A-Za-z0-9_-]{20,80}$ ]] || { echo "!!! LINKS — Drive 파일 ID 꼴이 아님"; exit 2; }
+[ -z "${DATA_REPO:-}${DATA_TOKEN:-}" ] || { [[ ${DATA_REPO:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ ${DATA_TOKEN:-} =~ ^hf_[A-Za-z0-9]{20,100}$ ]]; } \
+  || { echo "!!! DATA_REPO (<계정>/<저장소>) · DATA_TOKEN (hf_…) — 꼴이 맞지 않음. 둘 다 줘야 한다 (값은 찍지 않는다)"; exit 2; }
 case ${AMP:-1} in 0|1) ;; *) echo "!!! AMP = 0 | 1"; exit 2;; esac
 case ${ENC:-vitl} in vitl|vits) ;; *) echo "!!! ENC = vitl | vits"; exit 2;; esac
 case ${CKPT:-none} in none|keep|seed0|all) ;; *) echo "!!! CKPT = none | keep | seed0 | all"; exit 2;; esac
@@ -71,6 +75,8 @@ KIND=${KIND:-all}; FROM=${FROM:-}; SETS=${SETS:-}
 ARMS=${ARMS:-base,sep,ours}; SEEDS=${SEEDS:-0,1,2}; EPOCHS=${EPOCHS:-10}; BS=${BS:-16}; PAIR_BS=${PAIR_BS:-8}; AMP=${AMP:-1}; LIMIT=${LIMIT:-0}; WORKERS=${WORKERS:-8}; ENC=${ENC:-vitl}
 CKPT=${CKPT:-none}; STALL_MIN=${STALL_MIN:-40}; PROGRESS_SEC=${PROGRESS_SEC:-1800}; RETRY=${RETRY:-2}; DRY_RUN=${DRY_RUN:-0}
 PY=${PY:-}; DATA_DIR=${DATA_DIR:-}; LINKS=${LINKS:-}
+unset TD_HF_REPO TD_HF_TOKEN                                      # 받기 · check 만 읽는 값 (setup/get_data.py). 인자로 준 것만 쓴다
+[ -z "${DATA_REPO:-}" ] || export TD_HF_REPO=$DATA_REPO TD_HF_TOKEN=$DATA_TOKEN
 [ -n "$SEEDS" ] || { echo "!!! SEEDS 가 비어 있음"; exit 2; }
 SEED0=${SEEDS%%,*}
 STALL=$((STALL_MIN * 60))
@@ -120,7 +126,7 @@ for v in WORK HF_HOME UV_CACHE_DIR TD_CODE TD_DATA CK; do
 done
 echo "[run] $(date '+%F %T') 모드 $MODE · $([ $H200 = 1 ] && echo "H200 ($APP)" || echo 로컬) · 커밋 $(git rev-parse --short HEAD 2>/dev/null || echo '?')" \
      "· 작업 폴더 여유 $(df -h "$WORK" 2>/dev/null | awk 'NR==2 {print $4}') · 결과 $OUTJ · 결과 경로에 보이는 다른 작업 폴더 $(( $(find "$OUTROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) - 1 )) 개"
-[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
+[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}${DATA_REPO:+ · 데이터 = Hugging Face}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
 
 # ───────────────────────── 단계 실행기: 멈춤 감지 ─────────────────────────
 brief_fail() {  # 실패한 로그에서 마지막 예외 한 줄과 위치 (파일:줄 (함수)) 만 — 코드 내용은 찍지 않는다 (공개 댓글)

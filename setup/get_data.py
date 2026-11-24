@@ -9,6 +9,9 @@
      하나라도 한도에 걸려 있으면 아무것도 받지 않는다 (몇 개만 받고 실패하면 한도만 더 쓴다). 한도를 돌아가지는 않는다.
      한도는 파일 전체를 요청할 때만 보인다 — 첫 바이트만 묻는 요청은 한도에 걸려 있어도 통과한다 (2026-11-24 에 확인).
      --links = 작은 목록 파일 (JSON: {묶음 이름: Drive 파일 ID}) 의 Drive 파일 ID. run.sh 의 LINKS= 인자로 온다 (실행 명령에만 적는 값).
+     환경 변수 TD_HF_REPO (<계정>/<저장소>) · TD_HF_TOKEN (읽기 전용 토큰) 이 있으면 Drive 대신 Hugging Face 의 **비공개** 데이터 저장소에서 받는다
+     (run.sh 의 DATA_REPO= · DATA_TOKEN=, 실행 명령에만 적는 값). 파일 이름 = 묶음 이름. 받기 전에 모든 묶음의 크기를 먼저 물어 본다.
+     토큰은 huggingface.co 에만 보낸다 (다른 호스트로 넘겨질 때는 떼어 낸다). 저장소 이름 · 토큰은 화면에 찍지 않는다.
 어느 쪽이든 sha256 이 data.json 과 같아야 쓴다. 풀 때는 이름이 정해진 꼴인 PNG 만 (정규 파일만, 경로는 우리가 다시 만든다).
 끝나면 PNG 개수를 확인하고 <dest>/.done 에 '<종류> <해시>' 를 남긴다 (다시 부르면 건너뜀). 받은 tar 는 풀고 나서 지운다.
 화면에 주소 · 파일 ID 를 찍지 않는다. 표준 라이브러리만 쓴다.
@@ -26,6 +29,7 @@ import shutil
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -91,6 +95,72 @@ def request(fid, rng, timeout=120):
     return None, "?"
 
 
+HF_BASE = "https://huggingface.co"
+HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+HF_TOKEN = re.compile(r"^hf_[A-Za-z0-9]{20,100}$")
+HF_WHY = {401: "토큰이 틀림 (401)", 403: "토큰에 이 저장소를 읽을 권한이 없음 (403)", 404: "저장소나 파일이 없음 — 또는 토큰에 권한이 없음 (404)"}
+
+
+class DropAuth(urllib.request.HTTPRedirectHandler):
+    """다른 호스트로 넘겨질 때 Authorization 을 떼어 낸다 — 토큰은 huggingface.co 에만 보낸다 (서명된 저장소 주소는 토큰이 붙으면 거절하기도 한다)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(new.full_url).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            for d in (new.headers, new.unredirected_hdrs):
+                for k in [k for k in d if k.lower() == "authorization"]:
+                    del d[k]
+        return new
+
+
+HF_OPEN = urllib.request.build_opener(DropAuth).open
+
+
+def hf_env():
+    """환경 변수의 (저장소, 토큰) · 없으면 None · 꼴이 틀리면 ValueError (값은 메시지에 넣지 않는다)."""
+    repo, token = os.environ.get("TD_HF_REPO", ""), os.environ.get("TD_HF_TOKEN", "")
+    if not (repo or token):
+        return None
+    if not (HF_REPO.match(repo) and HF_TOKEN.match(token)):
+        raise ValueError("DATA_REPO (<계정>/<저장소>) · DATA_TOKEN (hf_…) 의 꼴이 맞지 않음 — 둘 다 줘야 한다")
+    return repo, token
+
+
+def hf_request(hf, name, rng, timeout=120):
+    """Hugging Face 비공개 데이터 저장소의 파일을 요청 → (열린 응답, None) 또는 (None, 까닭). hf = (저장소, 토큰)."""
+    url = f"{HF_BASE}/datasets/{hf[0]}/resolve/main/{urllib.parse.quote(name)}"
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": rng, "Authorization": f"Bearer {hf[1]}"})
+    try:
+        r = HF_OPEN(req, timeout=timeout)
+    except urllib.error.HTTPError as ex:
+        ex.close()
+        if ex.code in HF_WHY:
+            return None, HF_WHY[ex.code]
+        raise
+    if "text/html" in (r.headers.get("Content-Type") or ""):
+        with r:
+            return None, f"파일 대신 웹 페이지 '{page(r)[0]}'"
+    return r, None
+
+
+def hf_missing(hf, sizes):
+    """받기 전 확인: 저장소에 없거나 · 못 읽거나 · 크기가 다른 묶음 [(이름, 까닭)]. 첫 바이트만 묻는다 (sizes = {이름: 크기})."""
+    out = []
+    for name, size in sizes.items():
+        try:
+            r, why = hf_request(hf, name, "bytes=0-0", timeout=60)
+        except Exception as ex:
+            out.append((name, f"접속 실패 ({type(ex).__name__})"))
+            continue
+        if r is None:
+            out.append((name, why))
+            continue
+        with r:
+            if not (r.headers.get("Content-Range") or "").endswith("/" + str(size)):
+                out.append((name, "크기가 목록과 다름"))
+    return out
+
+
 def quota(title):
     return "quota" in (title or "").lower()
 
@@ -124,15 +194,21 @@ def read_links(fid):
     return d
 
 
-def download(name, size, fid, dst):
-    """Google Drive → dst (이어받기). 받은 크기가 맞으면 True."""
+def download(name, size, fid, dst, hf=None):
+    """Google Drive (fid) 또는 Hugging Face (hf = (저장소, 토큰)) → dst (이어받기). 받은 크기가 맞으면 True."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     part = dst + ".part"
     t = 0
     while t < 3:
         have = os.path.getsize(part) if os.path.exists(part) else 0
         try:
-            r, title = request(fid, f"bytes={have}-")
+            if hf:
+                r, title = hf_request(hf, name, f"bytes={have}-")
+                if r is None:                                     # 토큰 · 이름 문제는 다시 해도 같다
+                    print(f"!!! [data] {name}: Hugging Face 에서 받지 못함 — {title}")
+                    return False
+            else:
+                r, title = request(fid, f"bytes={have}-")
             if r is None:                                         # 파일 대신 웹 페이지 — 기다렸다 다시 (작업 하나에서 WAITS 만큼만)
                 if quota(title):
                     print(f"!!! [data] {name}: Drive 받기 한도 ('{title}') — 기다려도 곧 풀리지 않는다 (길면 하루). 나중에 같은 명령을 다시")
@@ -227,12 +303,24 @@ def main():
     if os.path.exists(done) and open(done).read().strip() == tag:
         print("[data] 이미 풀려 있음 (같은 작업 안)")
         return 0
+    try:
+        hf = hf_env()
+    except ValueError as ex:
+        print(f"!!! [data] {ex}")
+        return 1
     found = {name: next((c for c in search(a.search, f["size"]) if sha256(c) == f["sha256"]), None) for name, f in files.items()}
     lack = [n for n, p in found.items() if p is None]
     links = {}
-    if lack:                                                       # 올려 둔 사본이 없는 것만 받는다
+    if lack and hf:                                                # Hugging Face 비공개 저장소 — 받기 전에 모두 있는지 · 크기가 맞는지
+        bad = hf_missing(hf, {n: files[n]["size"] for n in lack})
+        if bad:
+            print(f"!!! [data] Hugging Face 저장소에서 받을 수 없는 묶음 {len(bad)} / {len(lack)} 개 — 아무것도 받지 않고 끝낸다")
+            for why in dict.fromkeys(w for _, w in bad):
+                print(f"!!! [data]   {why}: {', '.join(n for n, w in bad if w == why)}"[:390])
+            return 1
+    elif lack:                                                     # 올려 둔 사본이 없는 것만 받는다
         if not a.links:
-            print(f"!!! [data] 묶음이 없음 ({len(lack)} / {len(files)}): {', '.join(lack)} — 실행 명령에 LINKS=<목록 파일 ID> 를 주거나, 묶음을 /app/data 아래에 올린다 (README '데이터')")
+            print(f"!!! [data] 묶음이 없음 ({len(lack)} / {len(files)}): {', '.join(lack)} — 실행 명령에 DATA_REPO= · DATA_TOKEN= 또는 LINKS= 를 주거나, 묶음을 /app/data 아래에 올린다")
             return 1
         try:
             links = read_links(a.links)
@@ -254,8 +342,8 @@ def main():
     for name, f in files.items():
         src, how, t0 = found[name], "올려 둔 사본", time.time()
         if src is None:
-            src, how = os.path.join(a.dl, name), "Google Drive"
-            if not download(name, f["size"], links[name], src):
+            src, how = os.path.join(a.dl, name), "Hugging Face" if hf else "Google Drive"
+            if not download(name, f["size"], links.get(name), src, hf):
                 print(f"!!! [data] {name} 을 받지 못함")
                 return 1
             if sha256(src) != f["sha256"]:
@@ -265,7 +353,7 @@ def main():
         n = unpack(src, a.dest)
         ok = n == f["png"]
         print(f"[data] {name} {f['size'] / 2**30:.2f} GiB — {how} {t1 - t0:.0f} 초 · 풀기 {time.time() - t1:.0f} 초 · PNG {n:,} 개 " + ("(맞음)" if ok else f"!!! 기대 {f['png']:,}"), flush=True)
-        if how == "Google Drive":
+        if found[name] is None:                                    # 받은 tar 는 풀고 나서 지운다 (올려 둔 사본은 그대로)
             os.remove(src)
         if not ok:
             return 1

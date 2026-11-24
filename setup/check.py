@@ -50,6 +50,20 @@ def probe_drive(name, fid, size):
         return f"  접속 {name}: OK ({r.status})" + (" — 크기 맞음" if cr.endswith("/" + str(size)) else " — 크기 확인 안 됨")
 
 
+def probe_hf(name, hf, fname, size):
+    """Hugging Face 비공개 데이터 저장소의 묶음 — 첫 바이트만 요청해 있는지 · 크기가 맞는지 본다."""
+    import get_data
+    try:
+        r, why = get_data.hf_request(hf, fname, "bytes=0-0", timeout=20)
+    except Exception as ex:
+        return f"  접속 {name}: 실패 ({type(ex).__name__})"
+    if r is None:
+        return f"  접속 {name}: !!! {why}"
+    with r:
+        cr = r.headers.get("Content-Range") or ""
+        return f"  접속 {name}: OK ({r.status})" + (" — 크기 맞음" if cr.endswith("/" + str(size)) else " — !!! 크기가 목록과 다름")
+
+
 def box(app, links_id=""):
     print(f"[check] 파이썬 {platform.python_version()} · {platform.platform()}")
     try:
@@ -98,11 +112,19 @@ def box(app, links_id=""):
                     pass
     found.discard(None)
     lack = sorted(set(sizes.values()) - found)
-    print(f"[check] /app/data 에서 크기가 맞는 묶음: {len(found)} / {len(sizes)} 개" + (" — 없는 것은 LINKS= 로 준 곳에서 받는다" if lack else " (모두 있음)"))
+    print(f"[check] /app/data 에서 크기가 맞는 묶음: {len(found)} / {len(sizes)} 개" + (" — 없는 것은 DATA_REPO= (또는 LINKS=) 로 준 곳에서 받는다" if lack else " (모두 있음)"))
     drive = []
-    if links_id:
-        sys.path.insert(0, HERE)
-        import get_data
+    sys.path.insert(0, HERE)
+    import get_data
+    try:
+        hf = get_data.hf_env()
+    except ValueError as ex:
+        print(f"[check] !!! {ex}")
+        hf = None
+    if hf:                                                          # 묶음을 받을 곳 = Hugging Face 비공개 저장소 (저장소 이름 · 토큰은 찍지 않는다)
+        print(f"[check] 받을 곳: Hugging Face 비공개 데이터 저장소 — 묶음 {len(DATA['files'])} 개를 묻는다")
+        drive = [(lambda k=k, v=v: probe_hf(f"Hugging Face 데이터 ({k}, {gib(v['size'])})", hf, k, v["size"])) for k, v in DATA["files"].items()]
+    elif links_id:
         try:
             links = get_data.read_links(links_id)
             print(f"[check] 받을 곳 목록: 읽음 — 묶음 {len(links)} 개" + ("" if set(DATA["files"]) <= set(links) else " (!!! 목록에 없는 묶음이 있음)"))
@@ -111,7 +133,7 @@ def box(app, links_id=""):
         except Exception as ex:
             print(f"[check] 받을 곳 목록: !!! 읽지 못함 ({type(ex).__name__})")
     elif lack:
-        print("[check] LINKS= 를 주지 않음 — Drive 에서 받을 수 있는지는 확인하지 않았다")
+        print("[check] DATA_REPO= · DATA_TOKEN= 도 LINKS= 도 주지 않음 — 묶음을 받을 수 있는지는 확인하지 않았다")
     m = W["dav2_vitl"]
     fn = next(iter(m["files"]))
     jobs = [

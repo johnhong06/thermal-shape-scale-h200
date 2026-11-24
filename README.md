@@ -140,7 +140,7 @@ bash run.sh all ARMS=rt,rtk,rtf,rtn SEEDS=0 LINKS=<값>     # 7. 카메라 정�
 bash run.sh all ARMS=rtj SEEDS=0 LINKS=<값>                # 8. 조정 (4.5시간쯤)
 ```
 
-`LINKS`는 묶음을 받을 곳의 목록을 가리키는 값이고 저장소에는 적지 않는다. 결과 표는 화면 끝에 찍히고 결과 파일은 `/app/output/<작업>/results.zip`이다. 나머지 모드와 인자는 `run.sh` 맨 위에 있다.
+`LINKS`는 묶음을 받을 곳(Google Drive)의 목록을 가리키는 값이고 저장소에는 적지 않는다. 2026-11-24부터는 묶음을 Hugging Face의 비공개 데이터 저장소에서 받는다(Drive의 하루 받기 한도에 걸려서 옮김). 이때는 `LINKS=<값>` 대신 `DATA_REPO=<계정>/<저장소> DATA_TOKEN=<읽기 전용 토큰>`을 주고, 이 둘도 저장소에는 적지 않는다. 결과 표는 화면 끝에 찍히고 결과 파일은 `/app/output/<작업>/results.zip`이다. 나머지 모드와 인자는 `run.sh` 맨 위에 있다.
 
 ## 데이터와 사용 조건
 
