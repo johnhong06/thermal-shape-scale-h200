@@ -3,6 +3,8 @@
 묶음은 이 저장소에 없고 받는 주소도 저장소에 적지 않는다 (다시 배포하면 안 되는 데이터). 파일마다 찾는 순서:
   1. --search 폴더들 (H200 = /app/data, 로컬 시험 = DATA_DIR) 아래 5 단계 안에서 크기가 꼭 맞는 파일 — 올려 둔 사본 (이름 · 폴더는 상관없다)
   2. 없으면 --links 로 받은 목록의 Google Drive 파일에서 받는다 (이어받기, 3 번까지)
+     큰 파일에 Drive 가 확인 페이지 ('바이러스 검사를 못 함') 를 주면 그 양식대로 한 번 더 요청한다 (브라우저의 '무시하고 다운로드').
+     그래도 웹 페이지가 오면 (받기 한도 등) 제목을 찍고 5 분 · 10 분 기다렸다가 다시 받아 본다 — 작업 하나에서 모두 합쳐 두 번까지. 한도를 돌아가지는 않는다.
      --links = 작은 목록 파일 (JSON: {묶음 이름: Drive 파일 ID}) 의 Drive 파일 ID. run.sh 의 LINKS= 인자로 온다 (실행 명령에만 적는 값).
 어느 쪽이든 sha256 이 data.json 과 같아야 쓴다. 풀 때는 이름이 정해진 꼴인 PNG 만 (정규 파일만, 경로는 우리가 다시 만든다).
 끝나면 PNG 개수를 확인하고 <dest>/.done 에 '<종류> <해시>' 를 남긴다 (다시 부르면 건너뜀). 받은 tar 는 풀고 나서 지운다.
@@ -13,6 +15,7 @@
 """
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -20,6 +23,7 @@ import shutil
 import sys
 import tarfile
 import time
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,14 +47,55 @@ def drive_url(fid):
     return f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
 
 
+UA = "thermal-h200-setup"
+FORM_HOSTS = ("https://drive.usercontent.google.com/", "https://drive.google.com/")   # 확인 양식을 낼 곳은 Drive 뿐
+WAITS = [300, 600]                                                # 웹 페이지가 오면 기다렸다 다시 받아 보는 시간 (초) — 작업 하나에서 모두 합쳐 이만큼만
+
+
+def page(r):
+    """Drive 가 파일 대신 준 웹 페이지 → (제목, 확인 양식대로 만든 주소 또는 None).
+    제목은 화면에 찍으므로 ID 꼴의 긴 토큰을 가린다. 양식 = <form id="download-form"> 의 action + 숨은 칸 (id · export · confirm · uuid)."""
+    try:
+        t = r.read(1 << 18).decode("utf-8", "replace")
+    except Exception:
+        return "읽지 못함", None
+    m = re.search(r"<title[^>]*>(.*?)</title>", t, re.S | re.I)
+    title = re.sub(r"[A-Za-z0-9_-]{20,}", "…", re.sub(r"\s+", " ", html.unescape(m.group(1))).strip())[:60] if m else "제목 없음"
+    f = re.search(r'<form[^>]*\bid="download-form"[^>]*>.*?</form>', t, re.S | re.I)
+    if not f:
+        return title, None
+    act = re.search(r'<form[^>]*\baction="([^"]+)"', f.group(0), re.I)
+    act = html.unescape(act.group(1)) if act else ""
+    kv = [(html.unescape(k), html.unescape(v)) for k, v in
+          re.findall(r'<input[^>]*\btype="hidden"[^>]*\bname="([^"]+)"[^>]*\bvalue="([^"]*)"', f.group(0), re.I)]
+    if not (act.startswith(FORM_HOSTS) and kv):
+        return title, None
+    return title, act + ("&" if "?" in act else "?") + urllib.parse.urlencode(kv)
+
+
+def request(fid, rng, timeout=120):
+    """Drive 에 파일을 요청 → (열린 응답, None) 또는 (None, 웹 페이지의 제목). 확인 페이지가 오면 그 양식대로 한 번 더 요청한다."""
+    url = drive_url(fid)
+    for again in (True, False):
+        r = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA, "Range": rng}), timeout=timeout)
+        if "text/html" not in (r.headers.get("Content-Type") or ""):
+            return r, None
+        with r:
+            title, form = page(r)
+        if not (again and form and dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(form).query)).get("id") == fid):
+            return None, title                                    # 양식이 없거나 (한도 등) 다른 파일을 가리키면 따라가지 않는다
+        url = form
+    return None, "?"
+
+
 def read_links(fid):
     """목록 파일 (JSON, 수 KB) 을 받아 {묶음 이름: 파일 ID}. 주소 · ID 는 찍지 않는다."""
     if not ID.match(fid or ""):
         raise ValueError("LINKS 값의 꼴이 Drive 파일 ID 가 아님")
-    req = urllib.request.Request(drive_url(fid), headers={"User-Agent": "thermal-h200-setup"})
+    req = urllib.request.Request(drive_url(fid), headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=60) as r:
         if "text/html" in (r.headers.get("Content-Type") or ""):
-            raise ValueError("목록 파일 대신 웹 페이지가 옴 (공유가 꺼졌거나 ID 가 틀림)")
+            raise ValueError(f"목록 파일 대신 웹 페이지가 옴 '{page(r)[0]}' (공유가 꺼졌거나 ID 가 틀림)")
         d = json.loads(r.read(1 << 20).decode("utf-8"))
     if not isinstance(d, dict) or not all(isinstance(k, str) and isinstance(v, str) and ID.match(v) for k, v in d.items()):
         raise ValueError("목록 파일의 꼴이 다름")
@@ -61,14 +106,20 @@ def download(name, size, fid, dst):
     """Google Drive → dst (이어받기). 받은 크기가 맞으면 True."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     part = dst + ".part"
-    for t in range(3):
+    t = 0
+    while t < 3:
         have = os.path.getsize(part) if os.path.exists(part) else 0
-        req = urllib.request.Request(drive_url(fid), headers={"User-Agent": "thermal-h200-setup", "Range": f"bytes={have}-"})
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                if "text/html" in (r.headers.get("Content-Type") or ""):
-                    print(f"!!! [data] {name}: Drive 가 파일 대신 웹 페이지를 줌 (받기 한도 · 공유 꺼짐)")
+            r, title = request(fid, f"bytes={have}-")
+            if r is None:                                         # 파일 대신 웹 페이지 — 기다렸다 다시 (작업 하나에서 WAITS 만큼만)
+                if not WAITS:
+                    print(f"!!! [data] {name}: Drive 가 파일 대신 웹 페이지를 줌 — '{title}' (받기 한도 · 공유 꺼짐)")
                     return False
+                w = WAITS.pop(0)
+                print(f"[data] {name}: Drive 가 파일 대신 웹 페이지를 줌 — '{title}' · {w // 60} 분 뒤 다시 받아 봄", flush=True)
+                time.sleep(w)
+                continue
+            with r:
                 mode = "ab" if r.status == 206 else "wb"
                 got, mark = (have if mode == "ab" else 0), time.time()
                 with open(part, mode) as fh:
@@ -79,9 +130,11 @@ def download(name, size, fid, dst):
                             print(f"[data] {name} 받는 중 {got / 2**30:.2f} / {size / 2**30:.2f} GiB", flush=True)
                             mark = time.time()
         except Exception as ex:
-            print(f"[data] {name} 받기 끊김 ({t + 1}/3, {type(ex).__name__}) — 30 초 뒤 이어받기", flush=True)
+            t += 1
+            print(f"[data] {name} 받기 끊김 ({t}/3, {type(ex).__name__}) — 30 초 뒤 이어받기", flush=True)
             time.sleep(30)
             continue
+        t += 1
         if os.path.getsize(part) == size:
             os.replace(part, dst)
             return True
@@ -159,7 +212,7 @@ def main():
         try:
             links = read_links(a.links)
         except Exception as ex:
-            print(f"!!! [data] 받을 곳 목록을 읽지 못함 ({type(ex).__name__}: {str(ex)[:80] if isinstance(ex, ValueError) else ''})")
+            print(f"!!! [data] 받을 곳 목록을 읽지 못함 ({type(ex).__name__}: {str(ex)[:120] if isinstance(ex, ValueError) else ''})")
             return 1
         no = [n for n in lack if n not in links]
         if no:

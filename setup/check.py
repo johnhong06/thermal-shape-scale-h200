@@ -34,13 +34,18 @@ def probe(name, url, headers=None, expect=None):
         return f"  접속 {name}: 실패 ({type(ex).__name__})"
 
 
-def drive_note(size):
-    def f(r):
-        if "text/html" in (r.headers.get("Content-Type") or ""):
-            return " — 파일이 아니라 웹 페이지 (받기 막힘 · 공유 꺼짐)"
+def probe_drive(name, fid, size):
+    """작업이 받는 길 그대로 (확인 페이지가 오면 양식대로 한 번 더) 첫 바이트만 요청해 본다."""
+    import get_data
+    try:
+        r, title = get_data.request(fid, "bytes=0-0", timeout=20)
+    except Exception as ex:
+        return f"  접속 {name}: 실패 ({type(ex).__name__})"
+    if r is None:
+        return f"  접속 {name}: !!! 파일이 아니라 웹 페이지 '{title}' (받기 막힘 · 공유 꺼짐)"
+    with r:
         cr = r.headers.get("Content-Range") or ""
-        return " — 크기 맞음" if cr.endswith("/" + str(size)) else " — 크기 확인 안 됨"
-    return f
+        return f"  접속 {name}: OK ({r.status})" + (" — 크기 맞음" if cr.endswith("/" + str(size)) else " — 크기 확인 안 됨")
 
 
 def box(app, links_id=""):
@@ -99,7 +104,7 @@ def box(app, links_id=""):
         try:
             links = get_data.read_links(links_id)
             print(f"[check] 받을 곳 목록: 읽음 — 묶음 {len(links)} 개" + ("" if set(DATA["files"]) <= set(links) else " (!!! 목록에 없는 묶음이 있음)"))
-            drive = [(f"Google Drive ({k}, {gib(v['size'])})", get_data.drive_url(links[k]), {"Range": "bytes=0-0"}, drive_note(v["size"]))
+            drive = [(lambda k=k, v=v: probe_drive(f"Google Drive ({k}, {gib(v['size'])})", links[k], v["size"]))
                      for k, v in DATA["files"].items() if k in links]
         except Exception as ex:
             print(f"[check] 받을 곳 목록: !!! 읽지 못함 ({type(ex).__name__})")
@@ -113,9 +118,10 @@ def box(app, links_id=""):
         ("codeload.github.com", f"https://codeload.github.com/DepthAnything/Depth-Anything-V2/tar.gz/{COMMIT}", {"Range": "bytes=0-0"}, None),
         ("PyPI", "https://pypi.org/simple/pillow/", None, None),
         ("PyTorch 휠 색인", "https://download.pytorch.org/whl/cu128/torch/", None, None),
-    ] + drive
+    ]
+    jobs = [(lambda j=j: probe(*j)) for j in jobs] + drive
     with cf.ThreadPoolExecutor(len(jobs)) as ex:
-        for line in ex.map(lambda j: probe(*j), jobs):
+        for line in ex.map(lambda j: j(), jobs):
             print(line)
 
 

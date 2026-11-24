@@ -21,6 +21,7 @@ mkdir -p "$W"
 bash setup/fetch_code.sh "$W/code/Depth-Anything-V2"
 TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWarning tests/test_parts.py
 TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWarning tests/test_rel_jitter.py   # 1 단계의 크기 바꾸기 — 작은 영상으로, 따로 띄운 프로세스에서 (메모리)
+"${CAP[@]}" "$PY" -I -B tests/test_get_data.py                                  # Drive 받기 (확인 양식 · 웹 페이지가 올 때) — 이 PC 안의 작은 서버로, 바깥 접속 없음
 rm -rf "$W/output/smoke_local"
 "${CAP[@]}" bash run.sh smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits CKPT=keep JOB=smoke_local
 # 남긴 모델로 평가만 다시 (eval 모드) — 일부 세트만
