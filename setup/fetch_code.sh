@@ -3,15 +3,17 @@
 # 쓰는 파일만 <dest> 에 풀고 파일마다 목록 (sha256) 과 대조한다.
 #   dav2 (기본)  DepthAnything/Depth-Anything-V2 — metric_depth/depth_anything_v2/ · LICENSE (setup/code.sha256)
 #   unidepth     lpiccinelli-eth/UniDepth — unidepth/ 꾸러미 · LICENSE (setup/code_unidepth.sha256). 선생 점검 (run.sh teacher) 과 팔 ours 의 라벨 뽑기 (src/labels.py) 에 쓴다. 하나라도 다르거나 빠지면 실패. 이미 맞게 받았으면 건너뛴다 (.commit). 끊기면 30 초 쉬고 3 번까지.
+#   monother     ZuoJiaxing/monother_depth — zoedepth/ · torchhub/ (setup/code_monother.sha256). 선행 방법 평가 (run.sh prior, src/prior_eval.py) 에 쓴다
 # 이 코드는 저장소에 넣지 않고 고치지 않는다 — 우리 코드 (src/model.py · src/teacher_check.py) 가 불러 쓴다.
-# 사용: bash setup/fetch_code.sh <dest> [dav2|unidepth]
+# 사용: bash setup/fetch_code.sh <dest> [dav2|unidepth|monother]
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEST=${1:?"받을 폴더를 준다"}
 case ${2:-dav2} in
   dav2) REPO_NAME=DepthAnything/Depth-Anything-V2; COMMIT=a561b849ebae10a6f5ef49e26c83cbbcd36c71bf; LIST=$HERE/code.sha256;;
   unidepth) REPO_NAME=lpiccinelli-eth/UniDepth; COMMIT=8d8cfe4c7ee15297099983607febf0d4f32eb3d6; LIST=$HERE/code_unidepth.sha256;;
-  *) echo "!!! [code] 모르는 이름: $2 (dav2 | unidepth)" >&2; exit 2;;
+  monother) REPO_NAME=ZuoJiaxing/monother_depth; COMMIT=1fa67f1805596910427e030f6b3929299f4095f3; LIST=$HERE/code_monother.sha256;;
+  *) echo "!!! [code] 모르는 이름: $2 (dav2 | unidepth | monother)" >&2; exit 2;;
 esac
 export PYTHONDONTWRITEBYTECODE=1
 

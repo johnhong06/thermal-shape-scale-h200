@@ -1,5 +1,5 @@
 {
- "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검과 팔 ours 의 라벨 뽑기에 쓴다). setup/get_weights.py 가 읽는다. dav2_vits 는 2026-11-19 HF API 로 확인 — 상대 깊이 모델 점검 (run.sh relcheck) 과 열화상 판 TR2M 에 쓴다.",
+ "_note": "Hugging Face 공개 가중치 (토큰 없음, gated false) 를 고정 리비전으로. 크기 + sha256 (LFS) — 2026-11-16 HF API 로 확인하고 로컬에 받은 파일과 대조한 값 (unidepth_v2_vitl 은 2026-11-17 HF API 로 확인 — 선생 점검과 팔 ours 의 라벨 뽑기에 쓴다). setup/get_weights.py 가 읽는다. dav2_vits 는 2026-11-19 HF API 로 확인 — 상대 깊이 모델 점검 (run.sh relcheck) 과 열화상 판 TR2M 에 쓴다. monother_ms2 · da_v1_vitl 은 2026-11-25 HF API 로 확인 — 선행 방법 평가 (run.sh prior) 에 쓴다 (repo_type 이 있으면 모델 저장소가 아니다).",
  "dav2_vitl": {
   "repo": "depth-anything/Depth-Anything-V2-Large",
   "revision": "cbbb86a30ce19b5684b7a05155dc7e6cbc7685b9",
@@ -34,6 +34,30 @@
    "model.safetensors": {
     "size": 1415383604,
     "sha256": "ba73d3de735302ccc64a50f1e557122050c4b1893e6060b28dba05d6af3e67c6"
+   }
+  }
+ },
+ "monother_ms2": {
+  "repo": "RockyZuo/Monther-Depth",
+  "repo_type": "dataset",
+  "revision": "eafeae9e427fc1de8251facbad7ef90e804590b1",
+  "license": "MIT (저장소 표기) — MonoTher-Depth 저자가 MS2 로 학습해 공개한 가중치",
+  "files": {
+   "ZoeDepthDualv1_05-Aug_17-28-23b9f4b49f50_latest.pt": {
+    "size": 2740475915,
+    "sha256": "eb619ed058c52a2aee8b03d8a8029f0f840e84593c3175711daab6371f1746b8"
+   }
+  }
+ },
+ "da_v1_vitl": {
+  "repo": "LiheYoung/Depth-Anything",
+  "repo_type": "space",
+  "revision": "7f1457e21e74e7aa001c88fc15da5c74598aa3fa",
+  "license": "Apache-2.0 — Depth Anything V1 ViT-L (MonoTher-Depth 의 코드가 모델을 만들 때 먼저 읽는 파일)",
+  "files": {
+   "checkpoints/depth_anything_vitl14.pth": {
+    "size": 1341401882,
+    "sha256": "6c6a383e33e51c5fdfbf31e7ebcda943973a9e6a1cbef1564afe58d7f2e8fe63"
    }
   }
  }

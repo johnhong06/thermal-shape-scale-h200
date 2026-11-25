@@ -428,6 +428,41 @@ class Parts(unittest.TestCase):
             self.assertTrue(len(rows) == 4 and rows[1].endswith("| 0.0800 (0.9000)") and rows[2].endswith("| 0.1000") and rows[3].count("0.1200 (1.3000)") == 5)
             self.assertLessEqual(len(buf.getvalue().splitlines()), 46)
 
+    def test_prior(self):
+        """선행 방법 평가 (src/prior_eval.py) 의 우리 쪽 부품: 저자와 같은 전처리 · 남의 모델을 같은 규칙으로 재는 길 · 재현 확인."""
+        import cv2
+        import evaluate as E
+        import prior_eval as P
+        raw = np.random.default_rng(3).integers(2000, 9000, (64, 80), dtype=np.uint16)
+        x = P.their_tone(raw)
+        self.assertTrue(x.shape == (3, 64, 80) and x.dtype == np.float32 and float(x.min()) == 0.0 and float(x.max()) == 1.0)
+        img = raw.astype(np.float32) / (2 ** 16 - 1)                 # 저자 MS2 코드 (ms2thermal.py rawthermal_autoScale, minmax_norm) 를 옮겨 적은 것
+        lo, hi = np.percentile(img, 2), np.percentile(img, 98)
+        ms2 = np.clip((img - lo) / (hi - lo), 0, 1).astype(np.float32)
+        t = raw.astype(np.float32) / 2 ** 14                         # 저자 ViViD 코드 (data_thermal_rgbtd.py rawthermal_autoScale) 를 옮겨 적은 것
+        lo, hi = np.percentile(t, 2), np.percentile(t, 98)
+        t[t < lo], t[t > hi] = lo, hi
+        cv2.normalize(t, t, 0, 255, cv2.NORM_MINMAX)
+        self.assertTrue(np.array_equal(x[0], ms2) and np.allclose(x[1], np.clip(t / 255.0, 0, 1), atol=1e-5))
+        self.assertGreater(float(np.abs(x[0] - D.tone(raw)).max()), 1e-3)   # 우리 톤 처리 (1–99 백분위) 와는 다르다
+
+        class Stub(torch.nn.Module):                                # 입력의 평균 밝기 × 50 m 를 내는 가짜 모델 — 전처리가 실제로 걸렸는지 보인다
+            def forward(self, a, b, **kw):
+                return {"metric_depth": (a.mean((1, 2, 3)) * 50)[:, None, None, None].expand(-1, 1, 20, 30)}, None
+        m = Stub()
+        s, rows = E.eval_set(m, "sthereo", torch.device("cpu"), bs=1, workers=0, ds=D.Thermal("sthereo", prep=P.their_tone), predict=P.predictor(m, "x"))
+        self.assertEqual((s["n"], len(rows)), (2, 2))
+        self.assertTrue(np.isfinite(s["raw"]["abs_rel"]) and np.isfinite(s["scale"]["abs_med"]))
+        got = D.Thermal("sthereo", prep=P.their_tone)[0][0]
+        self.assertTrue(tuple(got.shape) == (3, 512, 640) and 0.0 <= float(got.min()) and float(got.max()) <= 1.0)   # 정규화하지 않은 0–1 (모델이 안에서 정규화)
+        met = lambda a: {"raw": {"abs_rel": a, "rmse": 1.0, "d1": 0.9}, "median": {"abs_rel": a}}  # noqa: E731
+        L, c = P.table({k: met(0.071) for k in P.MS2} | {"vivid": met(0.150), "fire": met(0.5)})
+        self.assertTrue(c["ok"] is True and "재현됨" in L[-1] and L[1].count("0.0710 / 1.000 / 0.9000") == 3 and "—" in L[1])
+        L, c = P.table({k: met(0.071) for k in P.MS2} | {"vivid": met(0.170)})
+        self.assertTrue(c["ok"] is False and "재현 안 됨" in L[-1] and "ViViD 밤 0.1700 (논문 0.153, 허용 ±0.008) 다름" in L[-1])
+        L, c = P.table({"fire": met(0.5)})
+        self.assertTrue(c["ok"] is None and "판정 안 함" in L[-1])
+
     def test_report(self):
         import contextlib
         import shutil

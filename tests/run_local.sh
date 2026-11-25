@@ -24,6 +24,9 @@ TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWar
 "${CAP[@]}" "$PY" -I -B tests/test_get_data.py                                  # Drive 받기 (확인 양식 · 웹 페이지가 올 때) — 이 PC 안의 작은 서버로, 바깥 접속 없음
 rm -rf "$W/output/smoke_local"
 "${CAP[@]}" bash run.sh smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits CKPT=keep JOB=smoke_local
+# 선행 방법 평가 (prior 모드) 의 흐름: 저자 코드 (고정 커밋) 를 받아 작은 인코더 · 무작위 초기화로 끝까지 — 가중치는 받지 않는다
+rm -rf "$W/output/prior_local"
+"${CAP[@]}" bash run.sh prior KIND=smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" WORKERS=0 ENC=vits JOB=prior_local
 # 남긴 모델로 평가만 다시 (eval 모드) — 일부 세트만
 rm -rf "$W/output/eval_local"
 "${CAP[@]}" bash run.sh eval FROM=smoke_local SETS=vivid,fire KIND=smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 WORKERS=0 ENC=vits JOB=eval_local

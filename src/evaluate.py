@@ -38,10 +38,11 @@ def uses_camera(model):
 
 
 @torch.no_grad()
-def eval_set(model, name, dev, limit=0, bs=16, workers=4, amp=False, samples=0, out=None, fsweep=()):
+def eval_set(model, name, dev, limit=0, bs=16, workers=4, amp=False, samples=0, out=None, fsweep=(), ds=None, predict=None):
     """→ (요약 dict, 사진별 행). 범위 안 정답이 거의 없는 사진은 건너뛴다 (n 과 n_all 로 구분).
-    fsweep = 초점거리 배율들 — 카메라 값의 fx · fy 에 곱해 다시 예측한다 (주점은 그대로). 맞게 준 예측 (raw) 은 바뀌지 않는다."""
-    ds = D.Thermal(name, limit)
+    fsweep = 초점거리 배율들 — 카메라 값의 fx · fy 에 곱해 다시 예측한다 (주점은 그대로). 맞게 준 예측 (raw) 은 바뀌지 않는다.
+    ds · predict = 남의 모델을 같은 규칙으로 잴 때 (src/prior_eval.py): 그 모델의 전처리를 건 세트와, (입력, 정답 크기) → 깊이 (B, H, W) m 를 내는 함수."""
+    ds = ds or D.Thermal(name, limit)
     loader = DataLoader(ds, batch_size=bs, shuffle=False, num_workers=workers, pin_memory=dev.type == "cuda")
     keep = {round(i * (len(ds) - 1) / max(samples - 1, 1)) for i in range(samples)} if samples else set()
     rows = []
@@ -51,7 +52,7 @@ def eval_set(model, name, dev, limit=0, bs=16, workers=4, amp=False, samples=0, 
     sweep = {k: {"given": [], "scaled": []} for k in fsweep}
     for x, gt, idx in loader:
         gt, x = gt.to(dev), x.to(dev, non_blocking=True)
-        pred = M.predict(model, x, gt.shape[-2:], amp, cam[None].expand(len(x), 4))
+        pred = predict(x, gt.shape[-2:]) if predict else M.predict(model, x, gt.shape[-2:], amp, cam[None].expand(len(x), 4))
         off = {k: M.predict(model, x, gt.shape[-2:], amp, (cam * cam.new_tensor([k, k, 1.0, 1.0]))[None].expand(len(x), 4)) for k in fsweep}
         for j in range(len(idx)):
             i = int(idx[j])

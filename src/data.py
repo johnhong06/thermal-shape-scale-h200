@@ -136,9 +136,10 @@ def flipped(seed, epoch, i):
 
 
 class Thermal(Dataset):
-    def __init__(self, name, limit=0, aug=None, seed=0, root=None):
-        assert name in SETS and aug in (None, "base")
-        self.name, self.aug, self.seed, self.epoch = name, aug, seed, 0
+    def __init__(self, name, limit=0, aug=None, seed=0, root=None, prep=None):
+        """prep = 16 비트 원본 (H, W) → 입력 (3, H, W) float32 를 내는 함수. 주면 우리 톤 처리 · 정규화 대신 쓴다 (선행 방법의 전처리 — src/prior_eval.py)."""
+        assert name in SETS and aug in (None, "base") and not (prep and aug)
+        self.name, self.aug, self.seed, self.epoch, self.prep = name, aug, seed, 0, prep
         self.items = frames(name, root)
         if limit and limit < len(self.items):                       # smoke: 같은 간격으로 limit 장
             self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
@@ -151,6 +152,8 @@ class Thermal(Dataset):
     def __getitem__(self, i):
         key, ip, dp = self.items[i]
         raw, dep = load_pair(ip, dp)
+        if self.prep:
+            return torch.from_numpy(self.prep(raw)), torch.from_numpy(np.ascontiguousarray(dep)), i
         x = tone(raw)
         if self.aug and flipped(self.seed, self.epoch, i):
             x, dep = x[:, ::-1], dep[:, ::-1]

@@ -26,8 +26,13 @@ def hub_dir():
     return os.path.join(os.path.expanduser(os.environ.get("HF_HOME") or "~/.cache/huggingface"), "hub")
 
 
+def kind(m):
+    """저장소 종류 — 모델 (기본) · dataset · space. 캐시 폴더 이름과 API 경로가 이것으로 갈린다."""
+    return m.get("repo_type", "model")
+
+
 def snap_dir(m):
-    return os.path.join(hub_dir(), "models--" + m["repo"].replace("/", "--"), "snapshots", m["revision"])
+    return os.path.join(hub_dir(), f"{kind(m)}s--" + m["repo"].replace("/", "--"), "snapshots", m["revision"])
 
 
 def problem(path, spec):
@@ -46,7 +51,7 @@ def problem(path, spec):
 
 
 def api_problems(m):
-    url = f"https://huggingface.co/api/models/{m['repo']}/revision/{m['revision']}?blobs=true"
+    url = f"https://huggingface.co/api/{kind(m)}s/{m['repo']}/revision/{m['revision']}?blobs=true"
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "thermal-h200-setup"}), timeout=30) as r:
         d = json.load(r)
     errs = [] if d.get("sha") == m["revision"] else ["리비전 다름"]
@@ -91,7 +96,7 @@ def main():
                 continue
             for t in range(3):
                 try:
-                    p = hf_hub_download(m["repo"], f, revision=m["revision"])
+                    p = hf_hub_download(m["repo"], f, revision=m["revision"], repo_type=kind(m))
                     break
                 except Exception as ex:
                     print(f"[weights] {k}/{f} 받기 실패 ({t + 1}/3, {type(ex).__name__}) — 30 초 뒤 다시", flush=True)

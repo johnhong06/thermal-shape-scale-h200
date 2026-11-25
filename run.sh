@@ -12,6 +12,8 @@
 #                                         #   MS2 val 의 RGB · 열화상에서 모양 오차를 잰다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh labelcheck [LIMIT=N]      # 선생 라벨 점검 (학습 없음, README '라벨 점검'): 쌍의 RGB 에 UniDepthV2 를 카메라 없이 · 실제 카메라 값을 주고 돌려
 #                                         #   라벨의 절대 깊이가 얼마나 달라지는지 본다 (세트마다 LIMIT 장, 기본 1000). MS2 의 RGB 에서는 정답과 견준다. KIND=smoke 면 작은 묶음으로
+#   bash run.sh prior                     # 선행 방법 (MonoTher-Depth) 을 우리 평가 세트에서 (학습 없음, README '선행 방법'): 저자가 공개한 코드 (고정 커밋) 와
+#                                         #   MS2 로 학습한 가중치를 받아 MS2 test · 처음 보는 네 곳을 우리와 같은 규칙으로 잰다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh setup [DRY_RUN=1] | data  # 한 단계만 (작업끼리 파일이 안 이어지므로 data 는 setup 도 먼저 한다)
 # KEY=값 (이슈 한 줄 명령에는 환경 변수를 못 넣으므로 인자로):
 #   ARMS=base,sep,ours   돌릴 팔 (쉼표, 안 주면 이 셋). base = 기준선 · sep = 모양 + 스케일 학생을 MS2 만으로 ·
@@ -49,7 +51,7 @@ cd "$(dirname "$0")" || exit 1
 REPO=$PWD
 MODE=${1:-}
 [ $# -gt 0 ] && shift
-MODES="check setup data smoke all eval teacher relcheck labelcheck"
+MODES="check setup data smoke all eval teacher relcheck labelcheck prior"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
 KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT FSWEEP DATA_REPO DATA_TOKEN"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
@@ -119,7 +121,7 @@ SETSID=$(command -v setsid || true)
 
 export HF_HUB_DISABLE_PROGRESS_BARS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HOME=${HF_DIR:-$WORK/hf} TORCH_HOME=$WORK/torch PIP_CACHE_DIR=$WORK/pip UV_CACHE_DIR=$WORK/uv/cache UV_PYTHON_INSTALL_DIR=$WORK/uv/python XDG_CACHE_HOME=$WORK/cache
-export TD_CODE=$WORK/code/Depth-Anything-V2 TD_UNIDEPTH=$WORK/code/UniDepth TD_DATA=$WORK/data
+export TD_CODE=$WORK/code/Depth-Anything-V2 TD_UNIDEPTH=$WORK/code/UniDepth TD_MONO=$WORK/code/monother TD_DATA=$WORK/data
 CK=$WORK/ck; STATE=$WORK/state
 [ "$MODE" = check ] || mkdir -p "$CK" "$STATE" "$RUNS" "$SUMM"
 under() { local p q; p=$(realpath -m "$1"); q=$(realpath -m "$2"); [ "$p" = "$q" ] || [[ $p == "$q"/* ]]; }
@@ -166,7 +168,7 @@ run_step() {  # 이름 로그 보이기(show|quiet) 명령… → 종료 코드 
     n=$(wc -l < "$log")
     if [ "$n" -gt "$seen" ]; then
       new=$(tail -n "+$((seen + 1))" "$log" | head -n $((n - seen))); seen=$n
-      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|labelcheck|판정|비교|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
+      [ "$show" = show ] && printf '%s\n' "$new" | grep -aE '^(\[(train|eval|data|labels|code|weights|env|teacher|relcheck|labelcheck|선행|판정|비교|표[0-9]?)|!!!)' | cut -c1-400 && lastshow=$t
     fi
     if [ $((t - lastshow)) -ge "$PROGRESS_SEC" ]; then echo "[$name] $(date +%H:%M) 진행 중 $((t / 60)) 분 · 로그 변화 없음 $((idle / 60)) 분"; lastshow=$t; fi
     if [ "$STOP" = 1 ]; then rc=130; break; fi
@@ -219,6 +221,7 @@ TPY=""
 NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ]; } && NEED_UD=1
 case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*|smoke:*,rtp,*|all:*,rtp,*|smoke:*,rts,*|all:*,rts,*|smoke:*,mtd,*|all:*,mtd,*|smoke:*,rtn,*|all:*,rtn,*|smoke:*,rtf,*|all:*,rtf,*|smoke:*,rtk,*|all:*,rtk,*|smoke:*,rtj,*|all:*,rtj,*) NEED_UD=1;; esac   # 선생 라벨을 쓰는 팔
 ENVNAME=train; [ $NEED_UD = 1 ] && ENVNAME=teacher
+[ "$MODE" = prior ] && ENVNAME=teacher                            # 선행 방법의 공식 코드는 이 환경 (torch 2.7.1 · timm · scipy · matplotlib) 에서 돌려 봤다
 setup_env() {
   local E=$WORK/envs/$ENVNAME h rc a n0 L=$LOGS/setup_env.log
   if [ -n "$PY" ]; then TPY=$PY; echo "[setup] 학습 파이썬 (주어진 것)"; return 0; fi
@@ -403,6 +406,23 @@ case "$MODE" in
     ll=$LIMIT; [ "$ll" = 0 ] && ll=1000
     run_step "라벨 점검" "$LOGS/labelcheck.log" show "${off[@]}" "$TPY" -I -B -u src/label_check.py --data "$WORK/data_lc" --out "$OUTJ/labelcheck" \
       --encoder "$ENC" --limit "$ll" --bs "$PAIR_BS" --workers "$WORKERS" || fail "라벨 점검 실패"
+    zip_results;;
+  prior)
+    setup_all || fail "준비 실패"
+    run_step code "$LOGS/setup_code.log" show bash setup/fetch_code.sh "$TD_MONO" monother || fail "선행 방법의 코드 받기 실패"
+    pw=()                                                         # 저자 가중치 + 그 코드가 모델을 만들 때 읽는 Depth Anything V1 (작은 인코더의 흐름 시험은 무작위 초기화라 받지 않는다)
+    if [ "$ENC" = vitl ]; then
+      run_step weights "$LOGS/setup_weights.log" show env -u HF_HUB_OFFLINE "$TPY" -I -B setup/get_weights.py --only monother_ms2,da_v1_vitl || \
+        run_step weights "$LOGS/setup_weights.log" show env -u HF_HUB_OFFLINE HF_HUB_DISABLE_XET=1 "$TPY" -I -B setup/get_weights.py --only monother_ms2,da_v1_vitl || fail "선행 방법의 가중치 받기 실패"
+      mw=$("$SYSPY" -I -B setup/get_weights.py --dir monother_ms2) && bw=$("$SYSPY" -I -B setup/get_weights.py --dir da_v1_vitl) || fail "선행 방법의 가중치가 캐시에 없음"
+      pw=(--ckpt "$mw/ZoeDepthDualv1_05-Aug_17-28-23b9f4b49f50_latest.pt" --base "$bw/checkpoints/depth_anything_vitl14.pth")
+    fi
+    lk=test_day.tar,test_night.tar,test_rainy.tar,firestereo_test.tar,vivid.tar,vivid_indoor.tar,sthereo.tar; [ "$KIND" = smoke ] && lk=smoke.tar   # 평가 묶음만
+    s=(--search); [ -d "$APP/data" ] && s+=("$APP/data"); [ -n "$DATA_DIR" ] && s+=("$DATA_DIR")
+    WATCH="$WORK/dl/*.part" run_step data "$LOGS/data.log" show "$SYSPY" -I -B -u setup/get_data.py --kind all --only "$lk" --dest "$TD_DATA" --dl "$WORK/dl" \
+      ${LINKS:+--links "$LINKS"} "${s[@]}" || fail "데이터 실패"
+    run_step "선행 평가" "$LOGS/prior.log" show "$TPY" -I -B -u src/prior_eval.py --code "$TD_MONO" "${pw[@]}" --encoder "$ENC" --out "$OUTJ/prior" \
+      --workers "$WORKERS" --limit "$LIMIT" ${SETS:+--sets "$SETS"} || fail "선행 평가 실패"
     zip_results;;
   eval)
     src=$OUTROOT/$FROM/ckpt
