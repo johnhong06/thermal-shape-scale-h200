@@ -24,6 +24,9 @@ TD_CODE=$W/code/Depth-Anything-V2 "${CAP[@]}" "$PY" -I -B -W ignore::ResourceWar
 "${CAP[@]}" "$PY" -I -B tests/test_get_data.py                                  # Drive 받기 (확인 양식 · 웹 페이지가 올 때) — 이 PC 안의 작은 서버로, 바깥 접속 없음
 rm -rf "$W/output/smoke_local"
 "${CAP[@]}" bash run.sh smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits CKPT=keep JOB=smoke_local
+# 보완 실험의 팔 (rtfn · rtc) 의 흐름: 증강 없이 라벨만 환산 · 영상을 기준 초점의 크기로 맞춰 넣기, 초점거리 배율까지
+rm -rf "$W/output/fix_local"
+"${CAP[@]}" bash run.sh smoke ARMS=rtfn,rtc FSWEEP=0.9,1.1 WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits JOB=fix_local
 # 선행 방법 평가 (prior 모드) 의 흐름: 저자 코드 (고정 커밋) 를 받아 작은 인코더 · 무작위 초기화로 끝까지 — 가중치는 받지 않는다
 rm -rf "$W/output/prior_local"
 "${CAP[@]}" bash run.sh prior KIND=smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" WORKERS=0 ENC=vits JOB=prior_local

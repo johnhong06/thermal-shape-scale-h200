@@ -152,11 +152,12 @@ class TR(torch.nn.Module):
     """열화상 판 TR2M. rel = 고정한 상대 깊이 모델 (build_teacher 의 것). forward → (D_r, A, B), 모두 (B, 14 ph, 14 pw) float32.
     고정한 쪽은 기울기 없이 돌리고 늘 eval 로 둔다. 영상 특징 = rel 의 마지막 층 패치 토큰 (정규화한 것) — 큰 모델을 한 번만 돌린다."""
 
-    def __init__(self, rel, ray=False, canon=False):
+    def __init__(self, rel, ray=False, canon=False, resize=False):
         super().__init__()
         self.rel = rel.eval().requires_grad_(False)
         self.scalemap = ScaleMap(rel.pretrained.embed_dim, ray_dim=RAY_DIM if ray else 0)
         self.register_buffer("canon", torch.tensor(bool(canon)))      # 출력이 기준 초점의 깊이인가 (common.canon_scale) — 체크포인트에 남겨 평가가 되돌린다
+        self.register_buffer("resize", torch.tensor(bool(resize)))    # 입력을 기준 초점의 영상으로 크기를 맞춰 넣는가 (to_canon, 팔 rtc) — 평가도 같은 길로
 
     def train(self, mode=True):
         super().train(mode)
@@ -178,9 +179,9 @@ def tr_depth(dr, a, b):
     return 1.0 / (a * dr + b).clamp(min=1e-8)
 
 
-def build_tr(encoder="vitl", weights="", ray=False, canon=False):
-    """weights = 상대 깊이 체크포인트 (전부 싣는다). 비우면 무작위 초기화 (시험용). ray · canon = 카메라 정보를 쓰는 팔 (TR 의 설명)."""
-    return TR(build_teacher(encoder, weights), ray, canon)
+def build_tr(encoder="vitl", weights="", ray=False, canon=False, resize=False):
+    """weights = 상대 깊이 체크포인트 (전부 싣는다). 비우면 무작위 초기화 (시험용). ray · canon · resize = 카메라 정보를 쓰는 팔 (TR 의 설명)."""
+    return TR(build_teacher(encoder, weights), ray, canon, resize)
 
 
 def ray_tokens(cam, in_hw, net_hw, bands=RAY_BANDS):
@@ -236,6 +237,19 @@ def rescale(x, r):
     return F.interpolate(x, (h2, w2), mode="bilinear", align_corners=False, antialias=h2 < h), w2 / w, h2 / h
 
 
+def to_canon(x, cam):
+    """입력 (B, 3, H, W) 을 기준 초점의 카메라로 찍은 크기로 바꾼다 (팔 rtc — 깊이 라벨을 환산하는 대신 영상을 맞춘다). 배율 = common.canon_scale(cam).
+    → (바꾼 입력, 바뀐 카메라 값). 배치의 카메라는 하나여야 한다. 초점이 이미 기준과 같으면 (MS2) 그대로 돌려준다 — 그 길은 쌍 없는 팔과 한 화소도 다르지 않다.
+    망 크기 (14 의 배수) 로 맞추며 생기는 1–2 % 의 초점 차는 남는다 — 그 몫은 canon_of 가 깊이에서 되돌린다."""
+    r = canon_scale(cam.float())
+    if float((r - r[0]).abs().max()) > 1e-4 * float(r[0]):
+        raise ValueError("to_canon: 한 배치에 카메라가 여럿이다")
+    if abs(float(r[0]) - 1.0) < 1e-4:
+        return x, cam
+    x, rx, ry = rescale(x, float(r[0]))
+    return x, cam_resize(cam, rx, ry)
+
+
 def predict_sep(model, x, out_hw, amp=False):
     """Sep 학생: 정규화된 입력 (B, 3, H, W) → (모양 zn (B, out_h, out_w), 스케일 s (B,)), float32. 중앙값은 망의 해상도에서 빼고, 그 뒤에 정답 크기로 올린다."""
     x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
@@ -256,10 +270,12 @@ def predict(model, x, out_hw, amp=False, cam=None):
     if isinstance(model, Sep):
         return sep_depth(*predict_sep(model, x, out_hw, amp))
     if isinstance(model, TR):
+        if bool(model.canon) and cam is None:
+            raise ValueError("기준 초점으로 배운 모델에는 카메라 값을 줘야 한다")
+        if bool(model.resize):                                         # 영상을 기준 초점의 크기로 맞춰 넣는다 (학습과 같은 길)
+            x, cam = to_canon(x, cam)
         d = predict_tr(model, x, out_hw, amp, cam)[0]
         if bool(model.canon):
-            if cam is None:
-                raise ValueError("기준 초점으로 배운 모델에는 카메라 값을 줘야 한다")
             d = d / canon_of(cam, x.shape[-2:])[:, None, None]
         return d
     x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
@@ -283,7 +299,8 @@ def load(encoder, ckpt):
     sd = torch.load(ckpt, map_location="cpu", weights_only=True)
     if any(k.startswith("scalemap.") for k in sd):
         sd.setdefault("canon", torch.tensor(False))                    # 앞선 판의 체크포인트에는 없다
-        m = build_tr(encoder, ray="scalemap.ray.weight" in sd, canon=bool(sd["canon"]))
+        sd.setdefault("resize", torch.tensor(False))
+        m = build_tr(encoder, ray="scalemap.ray.weight" in sd, canon=bool(sd["canon"]), resize=bool(sd["resize"]))
         m.load_state_dict(sd)
         return m
     m = build(encoder)

@@ -794,7 +794,8 @@ class Parts(unittest.TestCase):
             with torch.no_grad():
                 self.assertEqual(tuple(M.predict(m3, x, (126, 154)).shape), (2, 126, 154))
         import train as T
-        self.assertEqual(T.CAM_ARMS, {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True), "rtj": (True, True)})
+        self.assertEqual(T.CAM_ARMS, {"rtn": (False, False, ""), "rtf": (True, False, "jit"), "rtk": (True, True, "jit"), "rtj": (True, True, "jit"),
+                                      "rtfn": (True, False, ""), "rtc": (True, False, "image")})
         xr, rx, ry = M.rescale(torch.zeros(2, 3, 256, 640), C.JITTER[-1])                            # 입력만 바꾸는 쪽 (1 단계도 쓴다)
         self.assertEqual((tuple(xr.shape), rx, ry), ((2, 3, 364, 910), 910 / 640, 364 / 256))
         self.assertEqual(M.rescale(xr, 1.0), (xr, 1.0, 1.0))
@@ -822,6 +823,62 @@ class Parts(unittest.TestCase):
         for i in range(len(th)):
             same = torch.equal(th[i][0], plain[i][0])
             self.assertEqual(D.flipped(5, 0, i), not same)
+
+    def test_canon_resize(self):
+        """보완 실험의 팔 rtc (README '보완 실험'): 영상을 기준 초점의 크기로 맞춰 넣는 길 — MS2 는 그대로 · 초점이 긴 쌍은 줄인다 · 평가도 같은 길 · 체크포인트."""
+        import evaluate as E
+        M = self.M
+        ms2, kaist, tartan, frei = (torch.tensor(C.CAMS[k]) for k in ("ms2", "kaist", "tartan", "freiburg"))
+        x = torch.randn(2, 3, 256, 640)
+        xo, co = M.to_canon(x, ms2[None].expand(2, 4))
+        self.assertTrue(xo is x and torch.equal(co, ms2[None].expand(2, 4)))                         # MS2 = 기준 초점 → 한 화소도 안 바뀐다
+        self.assertIs(M.to_canon(x, C.cam_flip(ms2[None].expand(2, 4), 640))[0], x)                  # 뒤집어도 초점은 같다
+        for cam, hw, want in ((kaist, (512, 640), (280, 336)), (tartan, (512, 640), (476, 588)), (frei, (298, 640), (252, 532))):
+            xr, cr = M.to_canon(torch.randn(2, 3, *hw), cam[None].expand(2, 4))
+            self.assertEqual(tuple(xr.shape[-2:]), want)                                             # 망에 들어갈 크기 (14 의 배수) 로 바로
+            f = float((cr[0, 0] * cr[0, 1]).sqrt())
+            self.assertLess(abs(f / 387.787 - 1.0), 0.02)                                            # 바꾼 영상의 초점은 기준과 2 % 안
+            self.assertAlmostEqual(float(M.canon_of(cr, xr.shape[-2:])[0]), 387.787 / f, places=5)   # 남은 몫은 깊이에서 되돌린다
+        with self.assertRaises(ValueError):
+            M.to_canon(x, torch.stack([ms2, kaist]))                                                 # 한 배치에 카메라가 여럿이면 안 된다
+        torch.manual_seed(1)
+        tr = M.build_tr("vits", canon=True, resize=True).eval()
+        self.assertTrue(bool(tr.resize) and bool(tr.canon) and tr.scalemap.ray is None and E.uses_camera(tr))
+        self.assertFalse(bool(M.build_tr("vits", canon=True).resize))
+        torch.nn.init.constant_(tr.scalemap.t2.m[-1].bias, float(np.log(10.0)))                      # 깊이가 10 m 쯤 나오게 (시작값 그대로면 100 m)
+        torch.nn.init.normal_(tr.scalemap.t2.m[-1].weight, std=0.05)
+        ref = M.build_tr("vits", canon=True).eval()                                                  # 같은 가중치인데 영상을 맞추지 않는 모델
+        ref.load_state_dict({**tr.state_dict(), "resize": torch.tensor(False)})
+        with torch.no_grad():
+            xm, mc = torch.randn(2, 3, 126, 154), ms2[None].expand(2, 4)
+            self.assertTrue(torch.equal(M.predict(tr, xm, (126, 154), False, mc), M.predict(ref, xm, (126, 154), False, mc)))   # MS2 카메라에서는 같은 길
+            xq, kc = torch.randn(2, 3, 252, 308), kaist[None].expand(2, 4)
+            d = M.predict(tr, xq, (252, 308), False, kc)
+            x2, c2 = M.to_canon(xq, kc)
+            self.assertEqual(tuple(x2.shape[-2:]), (140, 168))
+            want = M.predict_tr(tr, x2, (252, 308), False, None)[0] / M.canon_of(c2, x2.shape[-2:])[:, None, None]
+            self.assertTrue(torch.equal(d, want) and tuple(d.shape) == (2, 252, 308))                # 줄여 넣고, 예측은 원래 크기로 올린다
+            self.assertFalse(torch.allclose(d, M.predict(ref, xq, (252, 308), False, kc)))           # 초점이 다른 카메라에서는 다른 길
+        with self.assertRaises(ValueError):
+            M.predict(tr, xm, (126, 154), False)
+        with tempfile.TemporaryDirectory() as t_:
+            f = os.path.join(t_, "final.pt")
+            torch.save(tr.state_dict(), f)
+            self.assertTrue(bool(M.load("vits", f).resize))
+            old = tr.state_dict()
+            del old["resize"]                                                                        # 앞선 판의 체크포인트 (resize 없음) 도 읽는다
+            torch.save(old, f)
+            m3 = M.load("vits", f)
+            self.assertTrue(bool(m3.canon) and not bool(m3.resize))
+        # 초점거리 배율: 영상을 맞추는 모델은 임베딩이 없어도 '틀린 초점을 준 것' 이 '배율만 곱한 것' 과 다르다 (넣는 크기가 달라진다). 라벨만 환산하는 모델은 같다
+        dev = torch.device("cpu")
+        s1, _ = E.eval_set(tr, "sthereo", dev, bs=2, workers=0, fsweep=(0.8,))
+        self.assertTrue(any(abs(s1["fsweep"]["0.8"]["given"][q] - s1["fsweep"]["0.8"]["scaled"][q]) > 1e-6 for q in C.METRICS))
+        s2, _ = E.eval_set(ref, "sthereo", dev, bs=2, workers=0, fsweep=(0.8,))
+        for q in C.METRICS:
+            self.assertAlmostEqual(s2["fsweep"]["0.8"]["given"][q], s2["fsweep"]["0.8"]["scaled"][q], places=4)
+        import train as T
+        self.assertTrue(all(a in T.ARMS for a in ("rtfn", "rtc")))
 
     def test_rel_check(self):
         import rel_check as RC

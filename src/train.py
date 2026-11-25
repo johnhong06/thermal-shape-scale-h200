@@ -27,6 +27,10 @@
         rtn = 카메라 정보 없이 · rtf = 깊이를 기준 초점의 것으로 환산해 배움 (common.canon_scale) + 크기 바꾸기 증강 (common.JITTER, 카메라 값도 같이) ·
         rtk = rtf + 모듈 입력에 시선 방향 임베딩 (model.ray_tokens). 증강의 배율은 스텝 · 시드로 정해지고 MS2 배치와 쌍 배치가 따로 뽑는다.
         rtj = rtk 와 같다 (여기 2 단계는 똑같다). 다른 것은 1 단계: 상대 깊이 모델도 같은 크기 바꾸기 증강으로 학습한 것을 쓴다 (train_rel.py --jitter, README '카메라 정보' 의 조정).
+  rtfn · rtc   보완 실험 (README '보완 실험') — 크기 바꾸기 증강 없이 카메라 정보를 쓴다. 1 단계 · 쌍 · 라벨 · 손실은 rtf 와 같다.
+        rtfn = rtf 에서 크기 바꾸기 증강만 뺀 것 (깊이 라벨을 기준 초점으로 환산하는 것은 그대로) — MS2 의 손해가 그 증강에서 오는지 가르는 진단 팔.
+        rtc  = 라벨을 환산하는 대신 입력 영상을 기준 초점의 크기로 맞춰 넣는다 (model.to_canon — 학습의 쌍과 평가의 모든 영상. MS2 는 기준 초점 그대로라 바뀌지 않는다).
+               배율이 쌍 세트마다 달라 쌍 배치를 세트별로 묶는다 (어느 세트를 뽑을지는 쌍 수에 비례 — 세트의 몫은 rtf 와 같다). 시선 방향 임베딩은 쓰지 않는다.
   mtd   base (한꺼번에 내는 구조, 전체 미세조정) + 쌍의 선생 절대 깊이에 SiLog. MonoTher-Depth 의 방식을 평가와 무관한 쌍으로 옮긴 비교 팔 (신뢰도 가중은 없음).
         rtp · mtd 의 쌍은 ours 와 같다 (KAIST · LLVIP · Freiburg · TartanRGBT, 선생 = UniDepthV2, 크기별 배치 · 쌍 수에 비례한 뽑기). 쓸 화소 = 라벨 0 초과 80 m 이하.
 
@@ -50,13 +54,14 @@ from common import (CAMS, JITTER, MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM
                     seed_all, shape_scale, silog, silog_px, ssi_trim, tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "mtd")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "rtfn", "rtc", "mtd")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
 LABEL_GROUPS = D.LABEL_GROUPS                                      # 선생 라벨을 쓰는 팔 (ours · rtp · mtd) 의 쌍 — 크기가 같은 것끼리
 LABEL_ARMS = ("ours", "rtp", "mtd")
-CAM_ARMS = {"rtn": (False, False), "rtf": (True, False), "rtk": (True, True), "rtj": (True, True)}   # 카메라 정보 실험의 팔 → (기준 초점으로 환산 + 크기 바꾸기 증강, 시선 방향 임베딩)
+# 카메라 정보를 쓰는 팔 → (깊이를 기준 초점의 것으로 배움, 시선 방향 임베딩, 입력 크기를 다루는 법: "jit" = 크기 바꾸기 증강 · "image" = 기준 초점의 크기로 맞춤 · "" = 그대로)
+CAM_ARMS = {"rtn": (False, False, ""), "rtf": (True, False, "jit"), "rtk": (True, True, "jit"), "rtj": (True, True, "jit"), "rtfn": (True, False, ""), "rtc": (True, False, "image")}
 
 
 def jitter(x, cam, r):
@@ -116,7 +121,7 @@ def main():
     ap.add_argument("--pair_bs", type=int, default=8, help="쌍 배치 (512×640 이라 MS2 배치 16 장과 화소 수가 같다)")
     ap.add_argument("--pl_weight", type=float, default=1.0, help="쌍 손실의 비중 (ours 에서는 쌍의 모양 손실)")
     ap.add_argument("--pl_scale_weight", type=float, default=1.0, help="ours: 쌍의 스케일 손실의 비중")
-    ap.add_argument("--jitter", default="", help="rtf · rtk: 크기 바꾸기 증강의 배율들 (쉼표). 비우면 common.JITTER (0.71–1.41 아홉) — 로컬 흐름 시험은 메모리 때문에 1 이하만 준다")
+    ap.add_argument("--jitter", default="", help="rtf · rtk · rtj: 크기 바꾸기 증강의 배율들 (쉼표). 비우면 common.JITTER (0.71–1.41 아홉) — 로컬 흐름 시험은 메모리 때문에 1 이하만 준다")
     ap.add_argument("--lr", type=float, default=5e-6)
     ap.add_argument("--encoder", default="vitl")
     ap.add_argument("--weights", default="", help="상대 깊이 체크포인트 (학생은 인코더만 싣고, 선생 · tr · rt 의 고정 모델은 전부 싣는다). 비우면 무작위 초기화 (시험)")
@@ -137,13 +142,13 @@ def main():
 
     seed_all(a.seed)
     cam_arm = a.arm in CAM_ARMS
-    canon, ray = CAM_ARMS.get(a.arm, (False, False))
+    canon, ray, how = CAM_ARMS.get(a.arm, (False, False, ""))
     jit = tuple(float(v) for v in a.jitter.split(",") if v) or JITTER
-    torch.backends.cudnn.benchmark = not canon                     # 입력 크기가 고정일 때만 (크기 바꾸기 증강을 쓰면 끈다)
+    torch.backends.cudnn.benchmark = how != "jit"                  # 입력 크기가 몇 가지로 고정일 때만 (크기 바꾸기 증강을 쓰면 끈다)
     ds = D.Thermal("train", a.limit, aug="base", seed=a.seed)
     sep, tr = a.arm in SEP, a.arm in ("tr", "rt", "rtp", "rts") or cam_arm
     if tr:                                                         # 고정한 상대 깊이 모델 + 작은 모듈 — 모듈만 학습한다
-        model = M.build_tr(a.encoder, a.weights, ray, canon).to(dev)
+        model = M.build_tr(a.encoder, a.weights, ray, canon, how == "image").to(dev)
         groups = [{"params": list(model.scalemap.parameters()), "lr": a.lr * 10.0}]
     else:
         model = M.build(a.encoder, a.weights)
@@ -194,14 +199,17 @@ def main():
     pit = pair_batches() if pds is not None else None
     lds = lits = None
     lgroups = D.CAM_LABEL_GROUPS if cam_arm else LABEL_GROUPS
+    if how == "image":                                             # 영상을 기준 초점에 맞추는 배율이 세트마다 다르다 → 한 배치는 한 세트끼리
+        lgroups = tuple((n,) for g in lgroups for n in g)
     if a.arm in LABEL_ARMS or cam_arm:                             # 쌍 + 미리 뽑아 둔 선생 라벨, 크기별로 따로
         lds = [d for d in (D.PairLabels(g, a.limit, sub="labels_cam" if cam_arm else "labels", cams=cam_arm) for g in lgroups) if len(d) >= a.pair_bs]
         if not lds:
             raise SystemExit(f"!!! [train {name}] 쌍이 쌍 배치 {a.pair_bs} 보다 적음")
         lits = [pair_batches(d, i + 1) for i, d in enumerate(lds)]
-        print(f"[train {name}] 쌍 (선생 라벨) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 (크기별, 배치 {a.pair_bs}, "
+        print(f"[train {name}] 쌍 (선생 라벨) " + " · ".join(f"{len(d):,}" for d in lds) + f" 개 ({'세트별' if how == 'image' else '크기별'}, 배치 {a.pair_bs}, "
               + (f"비중 모양 {a.pl_weight} · 스케일 {a.pl_scale_weight})" if a.arm == "ours" else f"선생의 절대 깊이에 SiLog, 비중 {a.pl_weight})")
-              + (f" · 라벨 = 카메라 값을 준 것 · 기준 초점 환산 {'켬' if canon else '끔'} · 크기 바꾸기 {f'{min(jit):.2f}–{max(jit):.2f}' if canon else '끔'} · 시선 방향 임베딩 {'켬' if ray else '끔'}"
+              + (f" · 라벨 = 카메라 값을 준 것 · 기준 초점 환산 {'켬' if canon else '끔'} · 크기 바꾸기 {f'{min(jit):.2f}–{max(jit):.2f}' if how == 'jit' else '기준 초점의 크기로 맞춤' if how == 'image' else '끔'}"
+                 f" · 시선 방향 임베딩 {'켬' if ray else '끔'}"
                  if cam_arm else ""), flush=True)
     cam_ms2 = torch.tensor(CAMS["ms2"], dtype=torch.float32, device=dev)
 
@@ -233,7 +241,10 @@ def main():
                     fl = torch.tensor([D.flipped(a.seed, ep, int(i)) for i in idx], device=dev)
                     cam = cam_ms2.expand(len(x), 4)
                     cam = torch.where(fl[:, None], cam_flip(cam, x.shape[-1]), cam)
-                    x, cam = jitter(x, cam, random.Random((a.seed * 1000003 + step) * 4 + 1).choice(jit))
+                    if how == "jit":
+                        x, cam = jitter(x, cam, random.Random((a.seed * 1000003 + step) * 4 + 1).choice(jit))
+                    elif how == "image":
+                        x, cam = M.to_canon(x, cam)                # MS2 는 기준 초점 그대로라 바뀌지 않는다
                     cs = M.canon_of(cam, x.shape[-2:])
                     gtc, dmax = gt * cs[:, None, None], MAX_DEPTH * cs     # 의사 정답의 상한 (80 m) 도 기준 초점의 값으로
                 pred, ma, mb, dr, xn = M.predict_tr(model, x, gt.shape[-2:], amp, cam if ray else None)
@@ -262,7 +273,10 @@ def main():
                     if cam_arm:                                    # rtn · rtf · rtk: 선생의 절대 깊이에 SiLog — 카메라 값을 아는 쌍, 2 단계의 모듈만 배운다
                         okp, pc = (lab > 0) & (lab <= MAX_DEPTH), pc[0]
                         if canon:
-                            xt, pc = jitter(xt, pc, random.Random((a.seed * 1000003 + step) * 4 + 2).choice(jit))
+                            if how == "jit":
+                                xt, pc = jitter(xt, pc, random.Random((a.seed * 1000003 + step) * 4 + 2).choice(jit))
+                            elif how == "image":
+                                xt, pc = M.to_canon(xt, pc)        # 쌍의 영상을 기준 초점의 크기로 — 라벨에는 망 크기 맞추기로 남은 1–2 % 만 곱해진다
                             lab = lab * M.canon_of(pc, xt.shape[-2:])[:, None, None]
                         lp = a.pl_weight * silog_px(M.predict_tr(model, xt, lab.shape[-2:], amp, pc if ray else None)[0], lab, okp)
                     elif a.arm == "ours":
@@ -312,7 +326,7 @@ def main():
         "pairs": {"sets": PAIRS[a.arm], "n": len(pds), "bs": a.pair_bs, "weight": a.pl_weight, "teacher_check": check} if pds is not None else
                  {"sets": lgroups, "n": [len(d) for d in lds], "bs": a.pair_bs, "weight": a.pl_weight,
                   **({"loss": "shape_scale", "scale_weight": a.pl_scale_weight} if a.arm == "ours" else {"loss": "silog"})} if lds is not None else None,
-        "camera": {"labels": "labels_cam", "canon": canon, "jitter": list(jit) if canon else None, "ray": ray} if cam_arm else None,
+        "camera": {"labels": "labels_cam", "canon": canon, "jitter": list(jit) if how == "jit" else None, "resize": how == "image", "ray": ray} if cam_arm else None,
         "minutes": round((time.time() - t_start) / 60, 1), "gpu_peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2) if dev.type == "cuda" else None,
         "params": p})
     print(f"[train {name}] 끝 — {step} 스텝", flush=True)
