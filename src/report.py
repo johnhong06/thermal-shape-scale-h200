@@ -70,6 +70,19 @@ def get(r, sets, var, key):
     return sum(vals) / len(vals)
 
 
+def sweep_cell(seeds, sets, k):
+    """초점거리 배율 k 의 칸: 그 배율로 준 예측의 raw AbsRel (괄호 = 맞게 준 예측에 배율만 곱한 값), 시드 평균. 값이 없으면 —."""
+    out = []
+    for how in ("given", "scaled"):
+        xs = []
+        for r in seeds.values():
+            v = [(((r.get(s) or {}).get("fsweep") or {}).get(k) or {}).get(how, {}).get("abs_rel") for s in sets]
+            if all(x is not None for x in v):
+                xs.append(sum(v) / len(v))
+        out.append(f"{sum(xs) / len(xs):.4f}" if xs else "—")
+    return "—" if out[0] == "—" else f"{out[0]} ({out[1]})"
+
+
 def cell(seeds, sets, var, keys=("abs_rel", "rmse", "d1")):
     parts = []
     for k in keys:
@@ -124,6 +137,14 @@ def summary(runs, out):
         rels = {a: v for a, v in rels.items() if v}
         L.append(f"[표6] MS2 val AbsRel — 마지막 {VAL_LAST} epoch 평균 (시드 평균) | " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in vlast.items() if v)
                  + (" | 1 단계 상대 깊이 모델 (사진마다 맞춘 뒤, 고정한 공식 모델 0.1267) " + " · ".join(f"{a} {sum(v) / len(v):.4f}" for a, v in rels.items()) if rels else ""))
+    for a in arms:                                                  # 초점거리를 틀리게 줬을 때 (FSWEEP 을 준 작업의, 카메라 정보를 쓰는 팔만)
+        ks = sorted({k for r in R[a].values() for v in r.values() if isinstance(v, dict) for k in (v.get("fsweep") or {})}, key=float)
+        if not ks:
+            continue
+        L.append(f"[표7] 초점거리를 틀리게 줬을 때 (카메라 값의 fx · fy 에 배율) — raw AbsRel, 괄호 = 맞게 준 예측에 그 배율만 곱한 값 | MS2 평균 | {zs_names}")
+        for k in sorted(set(ks) | {"1"}, key=float):
+            f = (lambda sets: cell(R[a], sets, "raw", ("abs_rel",))) if k == "1" else (lambda sets: sweep_cell(R[a], sets, k))  # noqa: E731
+            L.append(f"[표7] {a} ×{k} | {f(MS2)} | " + " | ".join(f([z]) for _, z in ZS))
     J = {}
     for arm in ("tr", "rt"):                                        # 구조 점검 — 같은 작업의 base 와 견준다 (앞선 작업의 base_ref 에는 val 이 없다)
         if vlast.get("base") and vlast.get(arm):

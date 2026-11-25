@@ -388,6 +388,46 @@ class Parts(unittest.TestCase):
         from evaluate import TEST_SETS
         self.assertEqual(set(TEST_SETS), set(D.SETS) - {"train", "val"})
 
+    def test_fsweep(self):
+        """초점거리 민감도 (README '초점거리 민감도'): 카메라 값의 fx · fy 에 배율을 곱해 다시 잰다 — 평가 · 표."""
+        import contextlib
+        import evaluate as E
+        import report as R
+        M, dev = self.M, torch.device("cpu")
+        self.assertFalse(E.uses_camera(self.model) or E.uses_camera(M.build_tr("vits")))             # base · rt 는 카메라 값을 읽지 않는다
+        tr = M.build_tr("vits", ray=True, canon=True).eval()
+        self.assertTrue(E.uses_camera(tr) and E.uses_camera(M.build_tr("vits", canon=True)))
+        torch.nn.init.constant_(tr.scalemap.t2.m[-1].bias, float(np.log(10.0)))   # 시작값 그대로면 깊이가 100 m 라 80 m 에 잘려 배율이 안 보인다 → 10 m 쯤으로
+        s0, _ = E.eval_set(tr, "sthereo", dev, bs=2, workers=0)
+        s1, _ = E.eval_set(tr, "sthereo", dev, bs=2, workers=0, fsweep=(0.8, 1.25))
+        self.assertTrue("fsweep" not in s0 and s0["raw"] == s1["raw"] and s0["scale"] == s1["scale"])   # 원래 지표는 그대로
+        self.assertEqual(list(s1["fsweep"]), ["0.8", "1.25"])
+        for v in s1["fsweep"].values():                              # 임베딩 투영이 0 (시작값) 이면 기준 초점 환산의 몫뿐 → 배율만 곱한 것과 같다
+            self.assertEqual(set(v["given"]), set(C.METRICS))
+            for q in C.METRICS:
+                self.assertAlmostEqual(v["given"][q], v["scaled"][q], places=4)
+        self.assertNotAlmostEqual(s1["fsweep"]["0.8"]["given"]["abs_rel"], s1["raw"]["abs_rel"], places=4)   # 초점을 틀리게 주면 깊이가 그만큼 달라진다
+        torch.manual_seed(0)
+        torch.nn.init.normal_(tr.scalemap.ray.weight, std=0.5)       # 임베딩이 일하면 배율만 곱한 것과 달라진다
+        torch.nn.init.normal_(tr.scalemap.t2.m[-1].weight, std=0.05)
+        s2, _ = E.eval_set(tr, "sthereo", dev, bs=2, workers=0, fsweep=(0.8,))
+        self.assertTrue(any(abs(s2["fsweep"]["0.8"]["given"][q] - s2["fsweep"]["0.8"]["scaled"][q]) > 1e-6 for q in C.METRICS))
+        # 표 7: 카메라 팔만, 배율 순서대로 (×1 = raw)
+        met = lambda a: {v: {k: a for k in C.METRICS} for v in C.VARIANTS} | {"n": 1, "n_all": 1, "scale": {"abs_med": a, "bias": a}}  # noqa: E731
+        fs = lambda a: {k: {"given": {q: a * float(k) for q in C.METRICS}, "scaled": {q: a + float(k) for q in C.METRICS}} for k in ("0.8", "1.2")}  # noqa: E731
+        with tempfile.TemporaryDirectory() as t:
+            for arm, sweep in (("rt", False), ("rtk", True)):
+                d = os.path.join(t, "runs", f"{arm}_s0", "eval")
+                os.makedirs(d)
+                json.dump({k: met(0.1) | ({"fsweep": fs(0.1)} if sweep else {}) for k in E.TEST_SETS}, open(os.path.join(d, "metrics.json"), "w"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                R.summary(os.path.join(t, "runs"), os.path.join(t, "summary"))
+            rows = [x for x in buf.getvalue().splitlines() if x.startswith("[표7]")]
+            self.assertEqual([x.split(" | ")[0] for x in rows[1:]], ["[표7] rtk ×0.8", "[표7] rtk ×1", "[표7] rtk ×1.2"])
+            self.assertTrue(len(rows) == 4 and rows[1].endswith("| 0.0800 (0.9000)") and rows[2].endswith("| 0.1000") and rows[3].count("0.1200 (1.3000)") == 5)
+            self.assertLessEqual(len(buf.getvalue().splitlines()), 46)
+
     def test_report(self):
         import contextlib
         import shutil

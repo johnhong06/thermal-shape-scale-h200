@@ -27,6 +27,8 @@
 #                      ours · rtp · rts · mtd 가 들어 있으면 학습 전에 선생 라벨을 한 번 뽑는다 (src/labels.py, 37,233 장) — 환경은 선생 점검의 것 (envs/teacher.txt) 을 쓴다
 #   SETS=<세트,…>      평가할 세트 (all · smoke · eval 모드). 안 주면 전부. 단계 2 는 MS2 test 만 (처음 보는 대상은 설계에 쓰지 않으므로 보지 않는다)
 #   JIT=<배율,…>       rtf · rtk 의 크기 바꾸기 증강 배율 (기본 0.71–1.41 아홉). 로컬 흐름 시험은 메모리 때문에 1 이하만 준다
+#   FSWEEP=<배율,…>    초점거리 민감도 (README '초점거리 민감도'): 평가 때 카메라 값의 fx · fy 에 이 배율을 곱해 한 번씩 더 잰다 (예 0.8,0.9,1.1,1.2).
+#                      카메라 정보를 쓰는 팔 (rtf · rtk · rtj) 만 — 다른 팔은 건너뛴다. 안 주면 안 잰다. 학습과 원래 지표는 바뀌지 않는다 ([표7])
 #   SEEDS=0,1,2   EPOCHS=10   BS=16   PAIR_BS=8 (pl · plv · ours · rtp · rts · rtn · rtf · rtk · rtj · mtd 의 쌍 배치, 선생 라벨 단계도 한 번에 이만큼)   AMP=1 (bf16 혼합 정밀도, 0 = 끔)   LIMIT=0 (학습 장 수 제한)   WORKERS=8 (사진을 읽는 작업자 수)
 #   CKPT=none|keep|seed0|all   학습한 모델 (final.pt, 하나에 1.3 GB). none = 버림 (기본) · keep = 결과 폴더의 ckpt/ 에 남김 (results.zip 에는 안 넣음 — 나중에 eval 모드로 씀) ·
 #                              seed0 · all = results.zip 에 넣음
@@ -49,7 +51,7 @@ MODE=${1:-}
 [ $# -gt 0 ] && shift
 MODES="check setup data smoke all eval teacher relcheck labelcheck"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
-KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT DATA_REPO DATA_TOKEN"
+KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT FSWEEP DATA_REPO DATA_TOKEN"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
 for a in "$@"; do
   k=${a%%=*}
@@ -65,7 +67,7 @@ chk ARMS "$LIST"; chk SEEDS "$LIST"; chk EPOCHS "$INT"; chk BS "$INT"; chk PAIR_
 case ${AMP:-1} in 0|1) ;; *) echo "!!! AMP = 0 | 1"; exit 2;; esac
 case ${ENC:-vitl} in vitl|vits) ;; *) echo "!!! ENC = vitl | vits"; exit 2;; esac
 case ${CKPT:-none} in none|keep|seed0|all) ;; *) echo "!!! CKPT = none | keep | seed0 | all"; exit 2;; esac
-chk FROM "$NAME"; chk JIT '^[0-9.]+(,[0-9.]+)*$'; [ -z "${SETS:-}" ] || [[ $SETS =~ ^[a-z_,]+$ ]] || { echo "!!! SETS — 세트 이름을 쉼표로"; exit 2; }
+chk FROM "$NAME"; chk JIT '^[0-9.]+(,[0-9.]+)*$'; chk FSWEEP '^[0-9.]+(,[0-9.]+)*$'; [ -z "${SETS:-}" ] || [[ $SETS =~ ^[a-z_,]+$ ]] || { echo "!!! SETS — 세트 이름을 쉼표로"; exit 2; }
 case ${KIND:-} in ""|smoke|all) ;; *) echo "!!! KIND = smoke | all"; exit 2;; esac
 [ "$MODE" != eval ] || [ -n "${FROM:-}" ] || { echo "!!! eval 모드에는 FROM=<앞선 작업 이름> 이 필요"; exit 2; }
 case ${DRY_RUN:-0} in 0) ;; 1) [ "$MODE" = setup ] || { echo "!!! DRY_RUN=1 은 setup 모드에만"; exit 2; };; *) echo "!!! DRY_RUN = 0 | 1"; exit 2;; esac
@@ -126,7 +128,7 @@ for v in WORK HF_HOME UV_CACHE_DIR TD_CODE TD_DATA CK; do
 done
 echo "[run] $(date '+%F %T') 모드 $MODE · $([ $H200 = 1 ] && echo "H200 ($APP)" || echo 로컬) · 커밋 $(git rev-parse --short HEAD 2>/dev/null || echo '?')" \
      "· 작업 폴더 여유 $(df -h "$WORK" 2>/dev/null | awk 'NR==2 {print $4}') · 결과 $OUTJ · 결과 경로에 보이는 다른 작업 폴더 $(( $(find "$OUTROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) - 1 )) 개"
-[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}${DATA_REPO:+ · 데이터 = Hugging Face}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
+[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}${FSWEEP:+ · FSWEEP=$FSWEEP}${DATA_REPO:+ · 데이터 = Hugging Face}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
 
 # ───────────────────────── 단계 실행기: 멈춤 감지 ─────────────────────────
 brief_fail() {  # 실패한 로그에서 마지막 예외 한 줄과 위치 (파일:줄 (함수)) 만 — 코드 내용은 찍지 않는다 (공개 댓글)
@@ -316,7 +318,7 @@ train_eval() {  # 팔 시드 — 끝난 것은 건너뜀 (같은 작업 안)
   fi
   if [ ! -f "$rd/eval/metrics.json" ]; then
     run_step "평가 $name" "$LOGS/eval_$name.log" show "$TPY" -I -B -u src/evaluate.py --ckpt "$ck/final.pt" --out "$rd/eval" --amp "$AMP" --bs "$BS" --workers "$WORKERS" --encoder "$ENC" \
-      ${SETS:+--sets "$SETS"} || return 1
+      ${SETS:+--sets "$SETS"} ${FSWEEP:+--fsweep "$FSWEEP"} || return 1
   fi
   if [ "$CKPT" = keep ]; then                                     # 결과 폴더에 남긴다 (results.zip 에는 안 넣음) — 나중에 eval 모드가 읽는다
     mkdir -p "$OUTJ/ckpt" && mv "$ck/final.pt" "$OUTJ/ckpt/$name.pt" && echo "[ckpt] $name.pt 남김 ($(du -h "$OUTJ/ckpt/$name.pt" | cut -f1))"
@@ -412,7 +414,7 @@ case "$MODE" in
       [[ $name =~ ^[a-z]+_s[0-9]+$ ]] || continue
       mkdir -p "$RUNS/$name"
       run_step "평가 $name" "$LOGS/eval_$name.log" show "$TPY" -I -B -u src/evaluate.py --ckpt "$f" --out "$RUNS/$name/eval" --amp "$AMP" --bs "$BS" --workers "$WORKERS" \
-        --encoder "$ENC" ${SETS:+--sets "$SETS"} || fail "$name 평가 실패"
+        --encoder "$ENC" ${SETS:+--sets "$SETS"} ${FSWEEP:+--fsweep "$FSWEEP"} || fail "$name 평가 실패"
     done
     report; zip_results;;
 esac
