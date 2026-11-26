@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import data as D  # noqa: E402
 import model as M  # noqa: E402
-from common import MIN_VALID, depth_metrics, eval_mask, seed_all, write_json  # noqa: E402
+from common import MIN_VALID, depth_metrics, edge_f1, eval_mask, seed_all, write_json  # noqa: E402
 from teacher_check import aligned, frames  # noqa: E402
 
 GAP = 0.02                # 열화상의 모양 오차가 RGB 보다 이만큼 넘게 나쁘면 고정해 쓰지 않는다
@@ -60,23 +60,26 @@ class Rgb(Dataset):
 
 
 @torch.no_grad()
-def measure(model, ds, dev, bs, workers, scale=1.0):
-    """→ 사진별 [(번호, AbsRel, δ1)] — 범위 안 정답이 MIN_VALID 미만인 사진은 건너뛴다. scale ≠ 1 이면 입력의 크기를 바꿔 넣고 예측을 정답 크기로 올린다."""
+def measure(model, ds, dev, bs, workers, scale=1.0, amp=False, edges=False):
+    """→ 사진별 [(번호, AbsRel, δ1)] (edges=True 면 끝에 경계 F1 (common.edge_f1, 경계가 없으면 None) 도) — 범위 안 정답이 MIN_VALID 미만인 사진은 건너뛴다.
+    scale ≠ 1 이면 입력의 크기를 바꿔 넣고 예측을 정답 크기로 올린다. 정답 화소는 evaluate.py 와 같은 규칙 (ds.border 가 참이면 ViViD 의 테두리를 뺀다).
+    1 단계의 val (train_rel) · 상대 깊이 점검 · 모양 실험의 평가 (rel_eval) 가 이 한 길을 쓴다."""
     rows = []
     for x, gt, idx in DataLoader(ds, batch_size=bs, shuffle=False, num_workers=workers):
         gt, x = gt.to(dev), x.to(dev)
         if scale != 1.0:
             x = F.interpolate(x, scale_factor=scale, mode="bilinear", align_corners=False, antialias=scale < 1.0)
-        disp = M.teacher_disp(model, x, amp=False)
+        disp = M.teacher_disp(model, x, amp=amp)
         if disp.shape[-2:] != gt.shape[-2:]:
             disp = F.interpolate(disp[:, None], gt.shape[-2:], mode="bilinear", align_corners=True)[:, 0]
         for j in range(len(idx)):
-            m = eval_mask(gt[j])
+            m = eval_mask(gt[j], getattr(ds, "border", False))
             if int(m.sum()) < MIN_VALID:
                 continue
-            r = depth_metrics(aligned(disp[j], gt[j], m)[m], gt[j][m].double())
+            al = aligned(disp[j], gt[j], m)
+            r = depth_metrics(al[m], gt[j][m].double())
             if np.isfinite(r["abs_rel"]):
-                rows.append((int(idx[j]), r["abs_rel"], r["d1"]))
+                rows.append((int(idx[j]), r["abs_rel"], r["d1"]) + ((edge_f1(al, gt[j], m),) if edges else ()))
     return rows
 
 

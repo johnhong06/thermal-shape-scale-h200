@@ -190,12 +190,18 @@ def silog_px(pred, gt, mask, min_px=100, lambd=0.5):
     return silog(pred, gt, mask, lambd)
 
 
+def mad_norm(v):
+    """1 차원 값 v → (중앙값, 중앙값에서의 평균 절대 편차 (아래를 1e-6 으로 막음)) — ssi_disp · grad_match 가 같은 맞춤을 쓰게."""
+    c = v.median()
+    return c, (v - c).abs().mean().clamp(min=1e-6)
+
+
 def ssi_disp(pred, gt, mask, trim=0.0, min_px=MIN_VALID):
     """상대 깊이 모델 학습의 손실 — 역깊이 꼴 예측 pred (B, H, W) 와 정답 gt (B, H, W, m) 의 역깊이 1 / gt 를 사진마다 (값 − 중앙값) / 평균 절대 편차 로
     맞춘 뒤의 절대 오차 평균 (MiDaS 의 스케일 · 기준점 무관 손실, ssi_trim 과 같은 맞춤). trim > 0 이면 큰 오차 그 비율을 버린다. 쓸 화소가 min_px 미만인 사진은 건너뛴다."""
     def norm(x):
-        x = x - x.median()
-        return x / x.abs().mean().clamp(min=1e-6)
+        c, sc = mad_norm(x)
+        return (x - c) / sc
     total, n = pred.sum() * 0.0, 0
     for b in range(pred.shape[0]):
         m = mask[b]
@@ -207,6 +213,82 @@ def ssi_disp(pred, gt, mask, trim=0.0, min_px=MIN_VALID):
         total = total + r.mean()
         n += 1
     return total / max(n, 1)
+
+
+def grad_match(pred, gt, mask, scales=4, min_px=MIN_VALID):
+    """경계 손실 (MiDaS · Depth Anything V2 의 gradient matching) — 촘촘한 라벨에만 쓴다. 역깊이 꼴 예측 pred (B, H, W) 와 라벨 gt (B, H, W, m) 의 역깊이를
+    ssi_disp 와 같은 식 ((값 − 중앙값) / 평균 절대 편차, 쓸 화소로) 으로 사진마다 맞춘 뒤, 그 차의 가로 · 세로 이웃 차의 절대값을 네 크기 (1 · 1/2 · 1/4 · 1/8 로 솎음) 에서
+    평균해 더한다. 이웃 둘이 모두 쓸 화소인 곳만 센다. 쓸 화소가 min_px 미만인 사진은 건너뛴다."""
+    def norm(x, m):
+        c, sc = mad_norm(x[m])
+        return (x - c) / sc
+    total, n = pred.sum() * 0.0, 0
+    for b in range(pred.shape[0]):
+        m = mask[b]
+        if int(m.sum()) < min_px:
+            continue
+        r = norm(pred[b].float(), m) - norm(1.0 / gt[b].float().clamp(min=MIN_DEPTH), m)
+        r = torch.where(m, r, torch.zeros_like(r))
+        for k in range(scales):
+            rr, mm = r[::2 ** k, ::2 ** k], m[::2 ** k, ::2 ** k]
+            mx, my = mm[:, 1:] & mm[:, :-1], mm[1:] & mm[:-1]
+            gx, gy = (rr[:, 1:] - rr[:, :-1]).abs(), (rr[1:] - rr[:-1]).abs()
+            total = total + ((gx * mx).sum() + (gy * my).sum()) / (mx.sum() + my.sum()).clamp(min=1)
+        n += 1
+    return total / max(n, 1)
+
+
+def feat_cos(s, t, mask=None, margin=None):
+    """토큰별 정렬 손실 — 학생 토큰 s 와 목표 토큰 t (둘 다 (B, N, C), 목표는 기울기 없음) 의 1 − 코사인 유사도를 쓸 토큰 (mask (B, N), 없으면 전부) 에서 평균한다.
+    margin (예: 0.85) 을 주면 유사도가 이미 그보다 큰 토큰은 뺀다 — Depth Anything 의 feature alignment loss 가 둔 여유 (없으면 정렬을 안 쓴 것보다 나빴다).
+    쓸 토큰이 하나도 없으면 0."""
+    c = torch.nn.functional.cosine_similarity(s.float(), t.float(), dim=-1)
+    keep = torch.ones_like(c, dtype=torch.bool) if mask is None else mask.bool()
+    if margin is not None:
+        keep = keep & (c.detach() < margin)
+    return ((1.0 - c) * keep).sum() / keep.sum().clamp(min=1)
+
+
+def feat_gram(s, t, mask=None):
+    """관계 정렬 손실 — 토큰의 값이 아니라 패치 사이의 관계를 맞춘다. 길이를 1 로 맞춘 토큰의 유사도 행렬 (N × N) 이 학생과 목표에서 같도록, 그 차의 제곱을 원소 평균한다
+    (DINOv3 의 Gram anchoring 과 같은 식을 원소 수로 나눈 것). mask (B, N) 를 주면 쓸 토큰끼리만. 특징 공간을 통째로 돌려도 값이 같다 — 목표와 같은 특징을 내라고 하지는 않는다.
+    쓸 토큰이 둘 미만인 사진은 건너뛴다."""
+    s, t = torch.nn.functional.normalize(s.float(), dim=-1), torch.nn.functional.normalize(t.float(), dim=-1)
+    total, n = s.sum() * 0.0, 0
+    for b in range(s.shape[0]):
+        sb, tb = (s[b], t[b]) if mask is None else (s[b][mask[b].bool()], t[b][mask[b].bool()])
+        if sb.shape[0] < 2:
+            continue
+        total = total + (sb @ sb.T - tb @ tb.T).pow(2).mean()
+        n += 1
+    return total / max(n, 1)
+
+
+EDGE_TS = (0.05, 0.10, 0.15, 0.20, 0.25)    # 경계 F1 의 문턱 — 이웃 화소의 깊이 비가 1 + t 를 넘으면 경계
+
+
+def edge_f1(pred, ref, mask, ts=EDGE_TS):
+    """경계 F1 (Depth Pro 의 경계 지표를 본뜬 것) — 뭉개진 예측을 숫자로 잡으려고. pred · ref (H, W) 양수 깊이 (ref = 정답 또는 선생), mask (H, W) = ref 를 쓸 화소.
+    가로 · 세로 이웃 화소 쌍 가운데 둘 다 mask 인 쌍에서, 깊이 비 (큰 쪽 / 작은 쪽) 가 1 + t 를 넘으면 그 쌍을 경계로 본다. 예측의 경계와 ref 의 경계가 같은 쌍에서 겹치는가의
+    F1 (정밀도 = 겹친 수 / 예측 경계 수, 재현율 = 겹친 수 / ref 경계 수) 을 t 마다 구해 평균한다. ref 에 경계가 없는 t 는 뺀다. 비로 정하므로 배율과 무관하다.
+    → float, ref 에 경계가 하나도 없으면 None. 듬성한 LiDAR 정답에서는 점이 이웃한 곳만 세므로 촘촘한 정답 (선생 · 깊이 카메라) 에서 더 믿을 만하다."""
+    rp, rr = [], []
+    for a, b in (((slice(None), slice(None, -1)), (slice(None), slice(1, None))), ((slice(None, -1), slice(None)), (slice(1, None), slice(None)))):
+        v = mask[a] & mask[b]
+        pa, pb, ra, rb = pred[a][v].double(), pred[b][v].double(), ref[a][v].double(), ref[b][v].double()
+        rp.append(torch.maximum(pa, pb) / torch.minimum(pa, pb).clamp(min=1e-6))
+        rr.append(torch.maximum(ra, rb) / torch.minimum(ra, rb).clamp(min=1e-6))
+    rp, rr = torch.cat(rp), torch.cat(rr)
+    f1s = []
+    for t in ts:
+        ep, er = rp > 1 + t, rr > 1 + t
+        nr = int(er.sum())
+        if nr == 0:
+            continue
+        tp, npred = int((ep & er).sum()), int(ep.sum())
+        prec, rec = (tp / npred if npred else 0.0), tp / nr
+        f1s.append(2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0)
+    return float(np.mean(f1s)) if f1s else None
 
 
 def fit_inv(dr, gt, mask):

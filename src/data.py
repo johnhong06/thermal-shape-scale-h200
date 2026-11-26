@@ -189,9 +189,9 @@ def label_path(name, key, root=None, sub="labels"):
 class PairLabels(Dataset):
     """쌍 + 미리 뽑아 둔 선생 라벨 → (열화상 입력 (3, H, W), 선생 깊이 (H, W) m — 못 쓰는 화소는 0). 한 세트 안에서는 크기가 같다."""
 
-    def __init__(self, names, limit=0, root=None, sub="labels", cams=False):
-        self.items = [(n, k, tp) for n in names for k, tp, _ in pair_frames(n, root)]
-        self.root, self.sub, self.cams = root, sub, cams              # cams = 세트의 카메라 값 (common.CAMS) 도 함께 낸다
+    def __init__(self, names, limit=0, root=None, sub="labels", cams=False, rgb=False):
+        self.items = [(n, k, tp, rp) for n in names for k, tp, rp in pair_frames(n, root)]
+        self.root, self.sub, self.cams, self.rgb = root, sub, cams, rgb   # cams = 세트의 카메라 값 (common.CAMS) 도 · rgb = 짝 RGB (정규화, 열화상과 같은 크기) 도 함께 낸다 (맨 뒤에)
         if limit and limit < len(self.items):
             self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
 
@@ -199,7 +199,7 @@ class PairLabels(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        name, key, tp = self.items[i]
+        name, key, tp, rp = self.items[i]
         t = Image.open(tp)
         t = np.array(t if t.mode in ("L", "I;16", "I") else t.convert("L"))
         lab = np.array(Image.open(label_path(name, key, self.root, self.sub)))
@@ -207,7 +207,14 @@ class PairLabels(Dataset):
             raise ValueError(f"예상과 다른 라벨: {name}/{key} {lab.shape} {lab.dtype} / 열화상 {t.shape}")
         x = (np.repeat(tone(t)[None], 3, 0) - MEAN) / STD
         out = (torch.from_numpy(x), torch.from_numpy(lab.astype(np.float32) / 256.0))
-        return out + (torch.tensor(CAMS[name], dtype=torch.float32),) if self.cams else out
+        if self.cams:
+            out = out + (torch.tensor(CAMS[name], dtype=torch.float32),)
+        if self.rgb:
+            c = np.asarray(Image.open(rp).convert("RGB"), np.float32)
+            if c.shape[:2] != t.shape:
+                raise ValueError(f"짝 RGB 의 크기가 열화상과 다르다: {name}/{key} {c.shape[:2]} / {t.shape}")
+            out = out + (torch.from_numpy(np.ascontiguousarray((c.transpose(2, 0, 1) / 255.0 - MEAN) / STD)),)
+        return out
 
 
 def check():

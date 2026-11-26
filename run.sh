@@ -8,6 +8,10 @@
 #                                         #   — 평가 데이터를 나중에 더했을 때 쓴다. SETS=<세트,…> 로 일부만
 #   bash run.sh teacher [LIMIT=N]         # 선생 점검 (학습 없음, README '선생 점검'): MS2 의 RGB 에서 두 선생 (Depth Anything V2 · UniDepthV2) 을 LiDAR 정답에 대 본다.
 #                                         #   KIND=smoke 면 16 장짜리 작은 묶음으로. 표와 판정이 화면 끝에 나온다
+#   bash run.sh shape ARMS=nopair,pair,… [HOLD=freiburg]   # 모양 실험 (README '모양 실험'): 1 단계 (상대 깊이 모델) 의 변형마다 학습하고 모양만 잰다 — 2 단계 없음. [표8] 모양 · [표9] 경계 · [표10] 표현과 기울기
+#                                         #   nopair = MS2 만 · pair = + 쌍의 선생 깊이 · 나머지는 pair 에 하나씩: edge = 경계 손실 · freeze = 인코더 고정 ·
+#                                         #   thr_cos | thr_gram | rgb_cos | rgb_gram = 특징 정렬 (목표: 같은 열화상 · 짝 RGB 를 원래 모델에 넣은 것 × 형태: 토큰별 · 관계)
+#                                         #   HOLD = 학습에서 빼 두고 방식을 고르는 데 쓰는 쌍 세트 (기본 freiburg, HOLD= 로 끔). 흐름 시험은 KIND=smoke EPOCHS=1 ENC=vits
 #   bash run.sh relcheck                  # 상대 깊이 모델 점검 (학습 없음, README '열화상 판 TR2M' 단계 1): Depth Anything V2 상대 깊이 ViT-L · ViT-S 를 고정한 채
 #                                         #   MS2 val 의 RGB · 열화상에서 모양 오차를 잰다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh labelcheck [LIMIT=N]      # 선생 라벨 점검 (학습 없음, README '라벨 점검'): 쌍의 RGB 에 UniDepthV2 를 카메라 없이 · 실제 카메라 값을 주고 돌려
@@ -54,16 +58,16 @@ cd "$(dirname "$0")" || exit 1
 REPO=$PWD
 MODE=${1:-}
 [ $# -gt 0 ] && shift
-MODES="check setup data smoke all eval teacher relcheck labelcheck prior"
+MODES="check setup data smoke all eval teacher relcheck labelcheck prior shape"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
-KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT FSWEEP DATA_REPO DATA_TOKEN"
+KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT FSWEEP DATA_REPO DATA_TOKEN HOLD"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
 for a in "$@"; do
   k=${a%%=*}
   if [ "$k" = "$a" ] || [[ " $KEYS " != *" $k "* ]]; then echo "!!! 모르는 인자: ${a%%=*} (KEY=값 꼴, KEY = $KEYS)"; exit 2; fi
   printf -v "$k" '%s' "${a#*=}"
 done
-INT='^[0-9]+$'; NAME='^[A-Za-z0-9_.+-]+$'; LIST='^[a-z0-9,]*$'
+INT='^[0-9]+$'; NAME='^[A-Za-z0-9_.+-]+$'; LIST='^[a-z0-9_,]*$'
 chk() { [ -z "${!1:-}" ] || [[ ${!1} =~ $2 ]] || { echo "!!! $1=${!1} — 형식이 맞지 않음"; exit 2; }; }
 chk ARMS "$LIST"; chk SEEDS "$LIST"; chk EPOCHS "$INT"; chk BS "$INT"; chk PAIR_BS "$INT"; chk LIMIT "$INT"; chk WORKERS "$INT"; chk STALL_MIN "$INT"; chk PROGRESS_SEC "$INT"; chk RETRY "$INT"; chk JOB "$NAME"
 [ -z "${LINKS:-}" ] || [[ $LINKS =~ ^[A-Za-z0-9_-]{20,80}$ ]] || { echo "!!! LINKS — Drive 파일 ID 꼴이 아님"; exit 2; }
@@ -76,9 +80,14 @@ chk FROM "$NAME"; chk JIT '^[0-9.]+(,[0-9.]+)*$'; chk FSWEEP '^[0-9.]+(,[0-9.]+)
 case ${KIND:-} in ""|smoke|all) ;; *) echo "!!! KIND = smoke | all"; exit 2;; esac
 [ "$MODE" != eval ] || [ -n "${FROM:-}" ] || { echo "!!! eval 모드에는 FROM=<앞선 작업 이름> 이 필요"; exit 2; }
 case ${DRY_RUN:-0} in 0) ;; 1) [ "$MODE" = setup ] || { echo "!!! DRY_RUN=1 은 setup 모드에만"; exit 2; };; *) echo "!!! DRY_RUN = 0 | 1"; exit 2;; esac
-_a=${ARMS:-}; for x in ${_a//,/ }; do case $x in base|pl|plv|sep|ours|tr|rt|rtp|rts|rtn|rtf|rtk|rtj|rtfn|rtc|rtkp|rtfnp|mtd) ;; *) echo "!!! ARMS 의 '$x' — base | sep | ours | tr | rt | rtp | rts | rtn | rtf | rtk | rtj | rtfn | rtc | rtkp | rtfnp | mtd | pl | plv"; exit 2;; esac; done
+if [ "$MODE" = shape ]; then _a=${ARMS:-}; for x in ${_a//,/ }; do case $x in nopair|pair|edge|freeze|thr_cos|thr_gram|rgb_cos|rgb_gram) ;; *) echo "!!! shape 모드의 ARMS '$x' — nopair | pair | edge | freeze | thr_cos | thr_gram | rgb_cos | rgb_gram"; exit 2;; esac; done
+else _a=${ARMS:-}; for x in ${_a//,/ }; do case $x in base|pl|plv|sep|ours|tr|rt|rtp|rts|rtn|rtf|rtk|rtj|rtfn|rtc|rtkp|rtfnp|mtd) ;; *) echo "!!! ARMS 의 '$x' — base | sep | ours | tr | rt | rtp | rts | rtn | rtf | rtk | rtj | rtfn | rtc | rtkp | rtfnp | mtd | pl | plv"; exit 2;; esac; done; fi
+case ${HOLD:-} in ""|kaist|llvip|freiburg|tartan) ;; *) echo "!!! HOLD — 쌍 세트 하나 (kaist | llvip | freiburg | tartan)"; exit 2;; esac
+[ -z "${HOLD:-}" ] || [ "$MODE" = shape ] || { echo "!!! HOLD 는 shape 모드에서만 쓴다 (다른 모드의 학습은 쌍을 빼 두지 않는다)"; exit 2; }
+[ "$MODE" != shape ] || [ "${CKPT:-none}" = none ] || { echo "!!! shape 모드는 CKPT 를 쓰지 않는다 (1 단계 모델은 평가한 뒤 지운다 — 다음 작업은 다시 학습한다)"; exit 2; }
 if [ "$MODE" = smoke ]; then KIND=${KIND:-smoke}; SEEDS=${SEEDS:-0}; EPOCHS=${EPOCHS:-1}; fi
 KIND=${KIND:-all}; FROM=${FROM:-}; SETS=${SETS:-}
+if [ "$MODE" = shape ]; then ARMS=${ARMS:-nopair,pair,freeze,thr_cos,thr_gram}; SEEDS=${SEEDS:-0}; HOLD=${HOLD-freiburg}; fi; HOLD=${HOLD:-}   # 모양 실험의 기본: 쌍 하나 (Freiburg) 를 빼 두고 그 세트로 방식을 고른다 (HOLD= 로 끔)
 ARMS=${ARMS:-base,sep,ours}; SEEDS=${SEEDS:-0,1,2}; EPOCHS=${EPOCHS:-10}; BS=${BS:-16}; PAIR_BS=${PAIR_BS:-8}; AMP=${AMP:-1}; LIMIT=${LIMIT:-0}; WORKERS=${WORKERS:-8}; ENC=${ENC:-vitl}
 CKPT=${CKPT:-none}; STALL_MIN=${STALL_MIN:-40}; PROGRESS_SEC=${PROGRESS_SEC:-1800}; RETRY=${RETRY:-2}; DRY_RUN=${DRY_RUN:-0}
 PY=${PY:-}; DATA_DIR=${DATA_DIR:-}; LINKS=${LINKS:-}
@@ -133,7 +142,7 @@ for v in WORK HF_HOME UV_CACHE_DIR TD_CODE TD_DATA CK; do
 done
 echo "[run] $(date '+%F %T') 모드 $MODE · $([ $H200 = 1 ] && echo "H200 ($APP)" || echo 로컬) · 커밋 $(git rev-parse --short HEAD 2>/dev/null || echo '?')" \
      "· 작업 폴더 여유 $(df -h "$WORK" 2>/dev/null | awk 'NR==2 {print $4}') · 결과 $OUTJ · 결과 경로에 보이는 다른 작업 폴더 $(( $(find "$OUTROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) - 1 )) 개"
-[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}${FSWEEP:+ · FSWEEP=$FSWEEP}${DATA_REPO:+ · 데이터 = Hugging Face}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
+[ "$MODE" = check ] || echo "[run] ARMS=$ARMS · SEEDS=$SEEDS · EPOCHS=$EPOCHS · BS=$BS · PAIR_BS=$PAIR_BS · AMP=$AMP · LIMIT=$LIMIT · WORKERS=$WORKERS · CKPT=$CKPT${JIT:+ · JIT=$JIT}${FSWEEP:+ · FSWEEP=$FSWEEP}${HOLD:+ · HOLD=$HOLD}${DATA_REPO:+ · 데이터 = Hugging Face}$([ "$ENC" = vitl ] || echo " · ENC=$ENC (무작위 초기화 — 흐름 시험)")"
 
 # ───────────────────────── 단계 실행기: 멈춤 감지 ─────────────────────────
 brief_fail() {  # 실패한 로그에서 마지막 예외 한 줄과 위치 (파일:줄 (함수)) 만 — 코드 내용은 찍지 않는다 (공개 댓글)
@@ -221,7 +230,7 @@ mkenv_body() {
 }
 TPY=""
 # UniDepthV2 가 필요한가: 선생 점검, 그리고 팔 ours · rtp · rts · rtn · rtf · rtk · rtj · rtfn · rtc · rtkp · rtfnp · mtd 를 학습하는 작업 (선생 라벨을 뽑는다). 그때는 학습 환경 + UniDepthV2 가 쓰는 꾸러미 (envs/teacher.txt, torch 판은 같다)
-NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ]; } && NEED_UD=1
+NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ] || [ "$MODE" = shape ]; } && NEED_UD=1
 case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*|smoke:*,rtp,*|all:*,rtp,*|smoke:*,rts,*|all:*,rts,*|smoke:*,mtd,*|all:*,mtd,*|smoke:*,rtn,*|all:*,rtn,*|smoke:*,rtf,*|all:*,rtf,*|smoke:*,rtk,*|all:*,rtk,*|smoke:*,rtj,*|all:*,rtj,*|smoke:*,rtfn,*|all:*,rtfn,*|smoke:*,rtc,*|all:*,rtc,*|smoke:*,rtkp,*|all:*,rtkp,*|smoke:*,rtfnp,*|all:*,rtfnp,*) NEED_UD=1;; esac   # 선생 라벨을 쓰는 팔
 ENVNAME=train; [ $NEED_UD = 1 ] && ENVNAME=teacher
 [ "$MODE" = prior ] && ENVNAME=teacher                            # 선행 방법의 공식 코드는 이 환경 (torch 2.7.1 · timm · scipy · matplotlib) 에서 돌려 봤다
@@ -355,8 +364,35 @@ os.replace(dst + ".tmp", dst)
 print(f"[zip] results.zip — 파일 {len(items)} 개 (체크포인트 {len(cks)}), {os.path.getsize(dst) / 2**20:.1f} MiB")
 PY
 }
-report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] && [ "$MODE" != relcheck ] && [ "$MODE" != labelcheck ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
+report() { [ -n "$TPY" ] && [ "$MODE" != teacher ] && [ "$MODE" != relcheck ] && [ "$MODE" != labelcheck ] && [ "$MODE" != shape ] || return 0; run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/report.py summary --runs "$RUNS" --out "$SUMM"; }
 fail() { echo "!!! [$MODE] $1"; report; zip_results; exit 1; }
+shape_report() { run_step report "$LOGS/report.log" show "$TPY" -I -B -u src/rel_eval.py --summary "$RUNS" --out "$SUMM"; }
+shape_one() {  # 변형 시드 — 모양 실험: 1 단계 (상대 깊이 모델) 만 학습하고 모양만 잰다. 2 단계는 없다. 끝난 것은 건너뜀 (같은 작업 안)
+  local v=$1 seed=$2 name=shape_$1_s$2 a w="" fl=()
+  local rd=$RUNS/$name ck=$CK/$name
+  mkdir -p "$rd" "$ck"
+  [ "$ENC" = vitl ] && w=$TD_DAV2
+  case $v in                                                     # nopair = MS2 만 · pair = + 쌍의 선생 깊이 · 나머지는 pair 에 하나씩 더한 것
+    nopair) ;;
+    pair) fl=(--pairs);;
+    edge) fl=(--pairs --grad_match 2.0);;                        # 쌍 라벨에 경계 손실 (Depth Anything V2 의 비 1 : 2)
+    freeze) fl=(--pairs --freeze_enc);;                          # 인코더 고정 (헤드만 학습)
+    thr_cos|thr_gram|rgb_cos|rgb_gram) fl=(--pairs --fa "$v");;  # 특징 정렬: 목표 (같은 열화상 · 짝 RGB) × 형태 (토큰별 · 관계) — train_rel.py --fa
+  esac
+  [ "$v" = nopair ] || fl+=(--pair_bs "$PAIR_BS" ${HOLD:+--hold "$HOLD"})
+  [ -f "$rd/eval/rel_metrics.json" ] && return 0
+  for ((a = 0; a <= RETRY; a++)); do
+    [ -f "$ck/rel/rel.pt" ] && [ -f "$rd/rel/done.json" ] && break
+    WATCH="$rd/rel/train_log.csv $rd/rel/val_log.csv" run_step "모양 학습 $name" "$LOGS/train_rel_$name.log" show "$TPY" -I -B -u src/train_rel.py --seed "$seed" \
+      --epochs "$EPOCHS" --bs "$BS" --amp "$AMP" --limit "$LIMIT" --workers "$WORKERS" --encoder "$ENC" --weights "$w" --out "$rd/rel" --ckpt "$ck/rel" "${fl[@]}" --resume
+    [ "$STOP" = 1 ] && return 130
+    [ -f "$rd/rel/fail.json" ] && return 1
+  done
+  [ -f "$ck/rel/rel.pt" ] && [ -f "$rd/rel/done.json" ] || { echo "!!! [모양 학습 $name] 끝내지 못함"; return 1; }
+  run_step "모양 평가 $name" "$LOGS/eval_rel_$name.log" show "$TPY" -I -B -u src/rel_eval.py --ckpt "$ck/rel/rel.pt" --out "$rd/eval" --encoder "$ENC" --bs "$BS" --workers "$WORKERS" \
+    --amp "$AMP" ${HOLD:+--hold "$HOLD"} ${w:+--origin "$w"} || return 1
+  rm -f "$ck/rel/rel.pt"                                           # 평가가 끝난 모델은 지운다 (작업 폴더 공간)
+}
 
 case "$MODE" in
   check) "$SYSPY" -I -B setup/check.py box --app "$APP" ${LINKS:+--links "$LINKS"};;
@@ -378,6 +414,17 @@ case "$MODE" in
       for arm in ${ARMS//,/ }; do
         train_eval "$arm" "$s" || fail "$arm 시드 $s 실패"
         report; zip_results
+      done
+    done;;
+  shape)                                                          # 모양 실험 (README '모양 실험'): 1 단계의 변형마다 학습 → 모양만 평가 → [표8]
+    setup_all || fail "준비 실패"
+    data_step || fail "데이터 실패"
+    off=(env); [ "$ENC" = vitl ] || off=(env -u HF_HUB_OFFLINE)   # 작은 인코더 (로컬 흐름 시험) 의 UniDepthV2 는 목록에 없어 그때 받는다
+    run_step "선생 라벨" "$LOGS/labels.log" show "${off[@]}" "$TPY" -I -B -u src/labels.py --encoder "$ENC" --bs "$PAIR_BS" --workers "$WORKERS" || fail "선생 라벨 실패"   # 카메라 없이 뽑는 라벨 (쌍 넷, 빼 둔 세트의 것도 — 평가에 쓴다)
+    for s in ${SEEDS//,/ }; do
+      for v in ${ARMS//,/ }; do
+        shape_one "$v" "$s" || fail "$v 시드 $s 실패"
+        shape_report; zip_results
       done
     done;;
   teacher)

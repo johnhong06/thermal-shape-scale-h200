@@ -341,6 +341,41 @@ def rel_forward(model, x, out_hw, amp=False):
     return F.interpolate(d.float()[:, None], out_hw, mode="bilinear", align_corners=True)[:, 0]
 
 
+def rel_forward_feats(model, x, out_hw, amp=False):
+    """rel_forward 와 같은 예측에 더해 인코더 마지막 층의 패치 토큰 (B, N, C) 도 낸다 (특징 정렬 손실용, 둘 다 기울기가 흐른다).
+    공식 모델의 forward 를 풀어 쓴 것이라 예측은 rel_forward 와 같다 (tests 가 대조한다). 토큰은 DPT 헤드가 받는 것과 같은 것 (마지막 정규화까지 거친 것)."""
+    x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
+    ph, pw = x.shape[-2] // 14, x.shape[-1] // 14
+    with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
+        feats = model.pretrained.get_intermediate_layers(x, model.intermediate_layer_idx[model.encoder], return_class_token=True)
+        d = model.depth_head(feats, ph, pw)[:, 0] * model.max_depth
+    return F.interpolate(d.float()[:, None], out_hw, mode="bilinear", align_corners=True)[:, 0], feats[-1][0]
+
+
+def origin_encoder(model):
+    """특징 정렬의 목표를 낼 고정한 원래 인코더 = 학습을 시작한 가중치 그대로의 인코더 사본 (헤드는 쓰지 않아 떼어 둔다). (인코더, 뽑는 층들)."""
+    import copy
+    return copy.deepcopy(model.pretrained).eval().requires_grad_(False), list(model.intermediate_layer_idx[model.encoder])
+
+
+@torch.no_grad()
+def origin_tokens(origin, x, amp=False):
+    """origin = origin_encoder 의 (인코더, 층들). 그 인코더 마지막 층의 패치 토큰 (B, N, C). 입력 크기 규칙이 학생과 같아 토큰 격자가 학생의 것과 맞는다."""
+    enc, layers = origin
+    x = F.interpolate(x, net_size(*x.shape[-2:]), mode="bilinear", align_corners=False)
+    with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=amp):
+        return enc.get_intermediate_layers(x, layers, return_class_token=True)[-1][0].float()
+
+
+def patch_bright(rgb, mean, std, thr):
+    """정규화된 RGB (B, 3, H, W) → 패치마다 선생이 볼 수 있는 곳인가 (B, N): 밝기 (세 채널 평균) 의 패치 (14 × 14) 평균이 thr 이상. 격자는 origin_tokens 와 같다.
+    쌍의 RGB 가 어두운 곳 (밤) 이나 값이 없는 곳 (0 으로 채운 곳) 을 특징 정렬에서 뺀다."""
+    m, s = rgb.new_tensor(mean).view(1, 3, 1, 1), rgb.new_tensor(std).view(1, 3, 1, 1)
+    lum = (rgb * s + m).mean(1, keepdim=True)
+    lum = F.interpolate(lum, net_size(*rgb.shape[-2:]), mode="bilinear", align_corners=False)
+    return (F.avg_pool2d(lum, 14) >= thr).flatten(1)
+
+
 @torch.no_grad()
 def teacher_disp(teacher, rgb, amp=False):
     """정규화된 RGB (B, 3, H, W) → 상대 깊이 (B, H, W), float32. 입력 크기 규칙은 학생과 같다 (14 의 배수로 반올림)."""

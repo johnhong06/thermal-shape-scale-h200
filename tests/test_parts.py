@@ -171,7 +171,7 @@ class Parts(unittest.TestCase):
 
     def test_pair_labels(self):
         ds = D.PairLabels(["kaist", "llvip", "tartan"])
-        self.assertEqual([(n, k) for n, k, _ in ds.items], [("kaist", "set00/V000/I00010.jpg"), ("kaist", "set03/V001/I00000.jpg"), ("llvip", "010001.jpg"),
+        self.assertEqual([(n, k) for n, k, _, _ in ds.items], [("kaist", "set00/V000/I00010.jpg"), ("kaist", "set03/V001/I00000.jpg"), ("llvip", "010001.jpg"),
                                                            ("tartan", "day1/20250822_115703/00000010.png")])
         for i in range(len(ds)):
             x, lab = ds[i]
@@ -816,7 +816,7 @@ class Parts(unittest.TestCase):
         self.assertEqual(C.tr_pseudo(aa, aa, dr_, gt_, mk, dmax=torch.tensor([120.0]))[1], 1)
         self.assertIs(T.jitter(x, cams, 1.0)[0], x)
         ds = D.PairLabels(["kaist", "tartan"], sub="labels_cam", cams=True)                          # 카메라 값을 아는 쌍 + 카메라 값을 주고 뽑은 라벨
-        self.assertEqual([n for n, _, _ in ds.items], ["kaist", "kaist", "tartan"])
+        self.assertEqual([n for n, _, _, _ in ds.items], ["kaist", "kaist", "tartan"])
         xx, lab, cc = ds[2]
         self.assertTrue(torch.allclose(cc, torch.tensor(C.CAMS["tartan"])) and float(lab.max()) <= 20.5 and tuple(xx.shape) == (3, 512, 640))
         th = D.Thermal("train", aug="base", seed=5)                                                  # 뒤집기 여부를 학습 쪽이 다시 알아낼 수 있어야 한다 (카메라 값을 같이 뒤집으려고)
@@ -880,6 +880,84 @@ class Parts(unittest.TestCase):
             self.assertAlmostEqual(s2["fsweep"]["0.8"]["given"][q], s2["fsweep"]["0.8"]["scaled"][q], places=4)
         import train as T
         self.assertTrue(all(a in T.ARMS for a in ("rtfn", "rtc", "rtkp", "rtfnp")))
+
+    def test_shape_losses(self):
+        """모양 실험의 손실: 경계 손실 · 토큰별 정렬 (여유) · 관계 정렬, 그리고 예측과 토큰을 함께 내는 길."""
+        M, Fn = self.M, torch.nn.functional
+        g = torch.Generator().manual_seed(5)
+        gt = torch.rand(2, 24, 32, generator=g) * 30 + 2
+        m = torch.rand(2, 24, 32, generator=g) < 0.8
+        inv = 1.0 / gt
+        self.assertLess(float(C.grad_match(inv * 5.0 + 0.2, gt, m)), 1e-5)        # 배율 · 기준점이 달라도 0
+        p = (inv + torch.rand(2, 24, 32, generator=g) * 0.02).requires_grad_(True)
+        lg = C.grad_match(p, gt, m)
+        lg.backward()
+        self.assertTrue(float(lg) > 0.01 and float(p.grad[m].abs().sum()) > 0)
+        self.assertEqual(float(C.grad_match(p, gt, torch.zeros_like(m))), 0.0)     # 쓸 화소가 없으면 0
+        flat = torch.full((1, 24, 32), 0.1)                                        # 경계가 있는 라벨에 밋밋한 예측 → 경계에서만 손실이 난다
+        edge = torch.full((1, 24, 32), 10.0)
+        edge[:, :, 16:] = 20.0
+        ramp = (1.0 / edge + torch.linspace(0, 1e-3, 32)[None, None]).requires_grad_(True)
+        self.assertLess(float(C.grad_match(ramp, edge, torch.ones(1, 24, 32, dtype=torch.bool))), 0.2)
+        blur = Fn.avg_pool2d(1.0 / edge[:, None], 9, 1, 4, count_include_pad=False)[:, 0]
+        full = torch.ones(1, 24, 32, dtype=torch.bool)
+        self.assertGreater(float(C.grad_match(blur, edge, full)), float(C.grad_match(1.0 / edge, edge, full)) + 0.05)   # 뭉갠 경계는 벌을 받는다
+        self.assertEqual(float(C.grad_match(flat + 0 * edge, edge, full)), float(C.grad_match(flat, edge, full)))
+        s, t = torch.randn(2, 12, 16, generator=g), torch.randn(2, 12, 16, generator=g)
+        self.assertLess(float(C.feat_cos(t * 3.0, t)), 1e-6)                       # 길이는 상관없다
+        mask = torch.zeros(2, 12, dtype=torch.bool)
+        mask[:, :4] = True
+        c = Fn.cosine_similarity(s, t, dim=-1)
+        self.assertAlmostEqual(float(C.feat_cos(s, t)), float((1 - c).mean()), places=6)
+        self.assertAlmostEqual(float(C.feat_cos(s, t, mask)), float((1 - c)[mask].mean()), places=6)
+        near = t + 0.05 * torch.randn(2, 12, 16, generator=g)                      # 유사도 0.99 쯤 — 여유 안
+        self.assertEqual(float(C.feat_cos(near, t, None, 0.85)), 0.0)
+        mix = torch.cat([near[:, :6], s[:, 6:]], 1)
+        cm = Fn.cosine_similarity(mix, t, dim=-1)
+        self.assertAlmostEqual(float(C.feat_cos(mix, t, None, 0.85)), float((1 - cm)[cm < 0.85].mean()), places=6)
+        mg = mix.clone().requires_grad_(True)
+        C.feat_cos(mg, t, None, 0.85).backward()
+        self.assertTrue(float(mg.grad[:, :6].abs().sum()) == 0 and float(mg.grad[:, 6:].abs().sum()) > 0)    # 여유 안의 토큰은 건드리지 않는다
+        q, _ = torch.linalg.qr(torch.randn(16, 16, generator=g))
+        rot = t @ q                                                                # 특징 공간을 통째로 돌린 것: 관계는 같고 값은 다르다
+        self.assertLess(float(C.feat_gram(rot, t)), 1e-10)
+        self.assertGreater(float(C.feat_cos(rot, t)), 0.1)
+        self.assertGreater(float(C.feat_gram(s, t)), 1e-3)
+        sg = s.clone().requires_grad_(True)
+        C.feat_gram(sg, t, mask).backward()
+        self.assertTrue(float(sg.grad[:, 4:].abs().sum()) == 0 and float(sg.grad[:, :4].abs().sum()) > 0)
+        self.assertEqual(float(C.feat_gram(s, t, torch.zeros(2, 12, dtype=torch.bool))), 0.0)
+        torch.manual_seed(0)
+        rel = M.build_rel("vits").eval()
+        x = torch.randn(2, 3, 126, 154)
+        with torch.no_grad():
+            d0, (d1, tok), t0 = M.rel_forward(rel, x, (126, 154)), M.rel_forward_feats(rel, x, (126, 154)), M.origin_tokens(M.origin_encoder(rel), x)
+        self.assertTrue(torch.allclose(d0, d1, atol=1e-6))                         # 풀어 쓴 길의 예측 = 공식 forward
+        self.assertEqual(tuple(tok.shape), (2, 9 * 11, 384))
+        self.assertTrue(torch.allclose(tok, t0, atol=1e-6))                        # 같은 모델 · 같은 입력이면 같은 토큰
+        enc, layers = M.origin_encoder(rel)
+        self.assertTrue(not any(q.requires_grad for q in enc.parameters()) and enc is not rel.pretrained and layers == list(rel.intermediate_layer_idx['vits']))
+        self.assertFalse(hasattr(enc, 'depth_head'))                              # 헤드는 들고 다니지 않는다
+        mean, std = D.MEAN.flatten().tolist(), D.STD.flatten().tolist()
+        px = torch.zeros(1, 3, 126, 154)
+        px[:, :, :, 77:] = 0.5                                                     # 왼쪽 절반은 까맣다
+        pm = M.patch_bright((px - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(1, 3, 1, 1), mean, std, C.PL_DARK).view(9, 11)
+        self.assertTrue(not bool(pm[:, :5].any()) and bool(pm[:, 5:].all()))
+        ds = D.PairLabels(["kaist", "llvip", "tartan"], rgb=True)                  # 짝 RGB 도 함께 (맨 뒤)
+        x3, lab, rgb = ds[0]
+        self.assertEqual((tuple(rgb.shape), rgb.dtype, tuple(x3.shape)), ((3, 512, 640), torch.float32, (3, 512, 640)))
+        self.assertEqual(len(D.PairLabels(["kaist"], sub="labels_cam", cams=True, rgb=True)[0]), 4)
+        ref = torch.full((20, 30), 10.0)                                           # 경계 F1: 가운데에 깊이가 두 배로 뛰는 경계 하나
+        ref[:, 15:] = 20.0
+        full = torch.ones(20, 30, dtype=torch.bool)
+        self.assertAlmostEqual(C.edge_f1(ref, ref, full), 1.0)
+        self.assertAlmostEqual(C.edge_f1(ref * 3.0, ref, full), 1.0)                 # 배율과 무관
+        ramp = torch.cat([torch.full((20, 11), 10.0), 10.0 * 2.0 ** (torch.arange(1, 9).float() / 8)[None].expand(20, 8), torch.full((20, 11), 20.0)], 1)
+        self.assertLess(C.edge_f1(ramp, ref, full), 0.2)                           # 아홉 칸에 걸쳐 뭉갠 경계는 낮다
+        self.assertIsNone(C.edge_f1(ref, torch.full((20, 30), 7.0), full))          # 기준에 경계가 없으면 None
+        half = full.clone()
+        half[:, 15:] = False                                                       # 경계 건너편이 기준에 없으면 그 쌍은 세지 않는다
+        self.assertIsNone(C.edge_f1(ref, ref, half))
 
     def test_rel_check(self):
         import rel_check as RC
