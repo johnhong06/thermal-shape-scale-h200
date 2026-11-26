@@ -27,6 +27,9 @@ rm -rf "$W/output/smoke_local"
 # 보완 실험의 팔 (rtfn · rtc) 의 흐름: 증강 없이 라벨만 환산 · 영상을 기준 초점의 크기로 맞춰 넣기, 초점거리 배율까지
 rm -rf "$W/output/fix_local"
 "${CAP[@]}" bash run.sh smoke ARMS=rtfn,rtc FSWEEP=0.9,1.1 WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits JOB=fix_local
+# 모양도 쌍으로 (rtkp · rtfnp) 의 흐름: 쌍을 넣은 1 단계를 한 번 학습해 두 팔이 함께 쓴다 (라벨은 카메라 없이 · 카메라 값을 주고 둘 다 뽑는다)
+rm -rf "$W/output/shape_local"
+"${CAP[@]}" bash run.sh smoke ARMS=rtkp,rtfnp JIT=0.71,0.84,1.0 WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" BS=2 PAIR_BS=1 WORKERS=0 ENC=vits JOB=shape_local
 # 선행 방법 평가 (prior 모드) 의 흐름: 저자 코드 (고정 커밋) 를 받아 작은 인코더 · 무작위 초기화로 끝까지 — 가중치는 받지 않는다
 rm -rf "$W/output/prior_local"
 "${CAP[@]}" bash run.sh prior KIND=smoke WORK="$W" PY="$PY" DATA_DIR="$SMOKE_DIR" HF_DIR="$HF_DIR" WORKERS=0 ENC=vits JOB=prior_local

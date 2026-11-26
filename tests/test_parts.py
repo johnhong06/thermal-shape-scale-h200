@@ -795,7 +795,8 @@ class Parts(unittest.TestCase):
                 self.assertEqual(tuple(M.predict(m3, x, (126, 154)).shape), (2, 126, 154))
         import train as T
         self.assertEqual(T.CAM_ARMS, {"rtn": (False, False, ""), "rtf": (True, False, "jit"), "rtk": (True, True, "jit"), "rtj": (True, True, "jit"),
-                                      "rtfn": (True, False, ""), "rtc": (True, False, "image")})
+                                      "rtfn": (True, False, ""), "rtc": (True, False, "image"), "rtkp": (True, True, "jit"), "rtfnp": (True, False, "")})
+        self.assertEqual((T.CAM_ARMS["rtkp"], T.CAM_ARMS["rtfnp"]), (T.CAM_ARMS["rtk"], T.CAM_ARMS["rtfn"]))        # 2 단계는 짝 팔과 똑같다
         xr, rx, ry = M.rescale(torch.zeros(2, 3, 256, 640), C.JITTER[-1])                            # 입력만 바꾸는 쪽 (1 단계도 쓴다)
         self.assertEqual((tuple(xr.shape), rx, ry), ((2, 3, 364, 910), 910 / 640, 364 / 256))
         self.assertEqual(M.rescale(xr, 1.0), (xr, 1.0, 1.0))
@@ -878,7 +879,7 @@ class Parts(unittest.TestCase):
         for q in C.METRICS:
             self.assertAlmostEqual(s2["fsweep"]["0.8"]["given"][q], s2["fsweep"]["0.8"]["scaled"][q], places=4)
         import train as T
-        self.assertTrue(all(a in T.ARMS for a in ("rtfn", "rtc")))
+        self.assertTrue(all(a in T.ARMS for a in ("rtfn", "rtc", "rtkp", "rtfnp")))
 
     def test_rel_check(self):
         import rel_check as RC

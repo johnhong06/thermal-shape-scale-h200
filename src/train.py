@@ -31,6 +31,8 @@
         rtfn = rtf 에서 크기 바꾸기 증강만 뺀 것 (깊이 라벨을 기준 초점으로 환산하는 것은 그대로) — MS2 의 손해가 그 증강에서 오는지 가르는 진단 팔.
         rtc  = 라벨을 환산하는 대신 입력 영상을 기준 초점의 크기로 맞춰 넣는다 (model.to_canon — 학습의 쌍과 평가의 모든 영상. MS2 는 기준 초점 그대로라 바뀌지 않는다).
                배율이 쌍 세트마다 달라 쌍 배치를 세트별로 묶는다 (어느 세트를 뽑을지는 쌍 수에 비례 — 세트의 몫은 rtf 와 같다). 시선 방향 임베딩은 쓰지 않는다.
+  rtkp · rtfnp   모양도 쌍으로 (README '모양도 쌍으로') — 여기 2 단계는 rtk · rtfn 과 똑같다. 다른 것은 1 단계: 상대 깊이 모델을 MS2 의 LiDAR 에 더해
+        쌍 넷 (KAIST · LLVIP · TartanRGBT · Freiburg) 의 선생 깊이로도 학습한 것을 쓴다 (train_rel.py --pairs — 배율 · 기준점과 무관한 손실이라 모양만 배운다).
   mtd   base (한꺼번에 내는 구조, 전체 미세조정) + 쌍의 선생 절대 깊이에 SiLog. MonoTher-Depth 의 방식을 평가와 무관한 쌍으로 옮긴 비교 팔 (신뢰도 가중은 없음).
         rtp · mtd 의 쌍은 ours 와 같다 (KAIST · LLVIP · Freiburg · TartanRGBT, 선생 = UniDepthV2, 크기별 배치 · 쌍 수에 비례한 뽑기). 쓸 화소 = 라벨 0 초과 80 m 이하.
 
@@ -54,14 +56,15 @@ from common import (CAMS, JITTER, MAX_DEPTH, MIN_DEPTH, PL_DARK, PL_MIN, PL_TRIM
                     seed_all, shape_scale, silog, silog_px, ssi_trim, tr_pseudo, vivid_grid, write_json)
 from evaluate import eval_set  # noqa: E402
 
-ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "rtfn", "rtc", "mtd")
+ARMS = ("base", "pl", "plv", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "rtfn", "rtc", "rtkp", "rtfnp", "mtd")
 TR_PSEUDO, TR_SMOOTH = 0.5, 0.01                                  # tr 의 손실 비중 (TR2M 의 λ2 · λ4)
 PAIRS = {"pl": ("kaist", "llvip"), "plv": ("vivid_day",)}
 SEP = ("sep", "ours")                                             # 모양 + 스케일 학생을 쓰는 팔
 LABEL_GROUPS = D.LABEL_GROUPS                                      # 선생 라벨을 쓰는 팔 (ours · rtp · mtd) 의 쌍 — 크기가 같은 것끼리
 LABEL_ARMS = ("ours", "rtp", "mtd")
 # 카메라 정보를 쓰는 팔 → (깊이를 기준 초점의 것으로 배움, 시선 방향 임베딩, 입력 크기를 다루는 법: "jit" = 크기 바꾸기 증강 · "image" = 기준 초점의 크기로 맞춤 · "" = 그대로)
-CAM_ARMS = {"rtn": (False, False, ""), "rtf": (True, False, "jit"), "rtk": (True, True, "jit"), "rtj": (True, True, "jit"), "rtfn": (True, False, ""), "rtc": (True, False, "image")}
+CAM_ARMS = {"rtn": (False, False, ""), "rtf": (True, False, "jit"), "rtk": (True, True, "jit"), "rtj": (True, True, "jit"), "rtfn": (True, False, ""), "rtc": (True, False, "image"),
+            "rtkp": (True, True, "jit"), "rtfnp": (True, False, "")}   # rtkp · rtfnp 의 2 단계 = rtk · rtfn (1 단계만 다르다)
 
 
 def jitter(x, cam, r):

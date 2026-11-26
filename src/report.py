@@ -108,7 +108,7 @@ def summary(runs, out):
         ref["base"] = f" ({spec['source']})"
     os.makedirs(out, exist_ok=True)
     L = []
-    order = ("base", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "rtfn", "rtc", "mtd", "pl", "plv")
+    order = ("base", "sep", "ours", "tr", "rt", "rtp", "rts", "rtn", "rtf", "rtk", "rtj", "rtfn", "rtc", "rtkp", "rtfnp", "mtd", "pl", "plv")
     arms = [a for a in order if a in R] + sorted(a for a in R if a not in order)
     zs_names = " | ".join(n for n, _ in ZS)
     L.append("[표1] MS2 test (학습과 같은 데이터) · raw — AbsRel / RMSE / δ1, 시드 평균±표준편차")
