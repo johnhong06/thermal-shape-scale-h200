@@ -22,7 +22,8 @@ MIN_DEPTH = 1e-3          # m — 공식 Depth Anything V2 metric 학습 (train.
 MAX_DEPTH = 80.0          # m — 평가 상한이자 모델 출력 상한 (Sigmoid × MAX_DEPTH)
 MIN_VALID = 10            # 범위 안 정답 픽셀이 이보다 적은 사진은 건너뜀 (공식 train.py 의 평가와 같음)
 # 열화상 카메라 초점거리 (px, 가로 640 기준). ms2 = calib.npy 의 K_thrL (20 시퀀스 같음) · fire = 저자 firestereo.yaml cam0 · vivid = calib_ther_to_rgb.yaml 의 K_Thermal
-FX = {"ms2": 387.787, "fire": 406.332, "vivid": 437.389, "sthereo": 429.433}      # sthereo = thermal_14bit_left.yaml 의 camera_matrix (영상은 왜곡을 편 것)
+FX = {"ms2": 387.787, "fire": 406.332, "vivid": 437.389, "sthereo": 429.433,     # sthereo = thermal_14bit_left.yaml 의 camera_matrix (영상은 왜곡을 편 것)
+      "vivid_rgb": 531.079}                                                     # ViViD 의 RGB 카메라 — RGB 기준 (src/rgb_eval.py) 만 쓴다
 FX_TRAIN = FX["ms2"]
 # 카메라 값 (fx, fy, cx, cy) px — 묶음의 영상 크기 기준. 열화상 평가 세트 넷 + 쌍 (열화상 시점) + MS2 의 RGB. None = 모름. README '카메라 정보'.
 _FR = (1017.8272, 1016.6098, 969.2854, 300.0874)                  # Freiburg Thermal 의 RGB 앞 왼쪽 (1920×650) — 저자 코드 저장소의 front_stereo_calibration.yaml
@@ -38,6 +39,7 @@ CAMS = {
     "tartan": (421.23237, 420.80872, 317.55166, 255.54589),                    # 공개 저장소 calibration/thermal_left.yaml (640×512, RGB 는 이 시점으로 옮긴 것)
     "llvip": None,                                                              # 논문 · 묶음에 값이 없다
     "ms2_rgb": (764.514, 764.514, 579.547, 153.005),                           # calib.npy 의 K_rgbL (1224×384, 20 시퀀스 같음)
+    "vivid_rgb": (FX["vivid_rgb"], 530.928, 322.043, 239.586),                 # calib_ther_to_rgb.yaml 의 K_RGB (640×480) — RGB 기준
 }
 F_CANON = FX_TRAIN        # 기준 초점거리 (px) — 깊이를 이 카메라에서 본 것으로 환산해 가르친다 (MS2 는 그대로)
 JITTER = tuple(2.0 ** (k / 8.0) for k in range(-4, 5))            # 크기 바꾸기 증강의 배율 아홉 (0.71–1.41, 1.0 포함) — 카메라 값도 같이 바꾼다

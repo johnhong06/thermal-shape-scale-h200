@@ -161,6 +161,34 @@ class Thermal(Dataset):
         return torch.from_numpy(x), torch.from_numpy(np.ascontiguousarray(dep)), i
 
 
+RGB_SETS = {"rgb_vivid": "vivid", "rgb_vivid_day": "vivid_day", "rgb_vivid_in": "vivid_in"}   # RGB 기준 (src/rgb_eval.py): ViViD 의 RGB 시점 → 같은 열화상 세트
+
+
+class RgbView(Dataset):
+    """ViViD 의 RGB 와 RGB 시점 깊이 정답 → (RGB (3, H, W) uint8, 정답 (H, W) m, 번호). 프레임 · 순서는 같은 이름의 열화상 세트와 같다
+    (그래서 저장하는 표본 16 장도 같은 프레임이다). 묶음 = vivid_rgb_eval.tar (+ 낮 야외의 RGB 는 vivid_day_rgb.tar)."""
+
+    def __init__(self, name, limit=0, root=None):
+        assert name in RGB_SETS
+        self.name = name
+        self.items = [(k, ip.replace(os.sep + "Thermal" + os.sep, os.sep + "RGB" + os.sep), dp.replace(os.sep + "Depth_T" + os.sep, os.sep + "Depth_RGB" + os.sep))
+                      for k, ip, dp in frames(RGB_SETS[name], root)]
+        if limit and limit < len(self.items):
+            self.items = [self.items[round(i * (len(self.items) - 1) / max(limit - 1, 1))] for i in range(limit)]
+        self.fx_key, self.border = "vivid_rgb", True                 # 정답 테두리는 열화상 ViViD 와 같은 규칙으로 뺀다
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        _, rp, dp = self.items[i]
+        rgb = np.asarray(Image.open(rp).convert("RGB"))
+        dep = np.array(Image.open(dp))
+        if rgb.shape[:2] != dep.shape or dep.dtype != np.uint16:
+            raise ValueError(f"예상과 다른 사진: {os.path.basename(rp)} {rgb.shape} / 깊이 {dep.shape} {dep.dtype}")
+        return torch.from_numpy(rgb.transpose(2, 0, 1).copy()), torch.from_numpy(dep.astype(np.float32) / 256.0), i
+
+
 class Pairs(Dataset):
     """정답 없는 쌍 → (열화상 입력 (3, H, W), RGB 입력 (3, Hr, Wr)). 둘 다 ImageNet 정규화. 열화상은 평가 때와 같은 고정 톤 처리."""
 

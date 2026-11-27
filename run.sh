@@ -18,6 +18,8 @@
 #                                         #   라벨의 절대 깊이가 얼마나 달라지는지 본다 (세트마다 LIMIT 장, 기본 1000). MS2 의 RGB 에서는 정답과 견준다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh prior                     # 선행 방법 (MonoTher-Depth) 을 우리 평가 세트에서 (학습 없음, README '선행 방법'): 저자가 공개한 코드 (고정 커밋) 와
 #                                         #   MS2 로 학습한 가중치를 받아 MS2 test · 처음 보는 네 곳을 우리와 같은 규칙으로 잰다. KIND=smoke 면 작은 묶음으로
+#   bash run.sh rgbref                    # RGB 기준 (학습 없음, README 15 절): RGB 용 metric 모델 (UniDepthV2, 선생과 같은 가중치) 을 열화상 평가 세트 전부와
+#                                         #   ViViD 의 같은 프레임의 RGB (밤 · 낮 · 실내) 에 — 카메라 값을 준다. KIND=smoke 면 작은 묶음으로
 #   bash run.sh setup [DRY_RUN=1] | data  # 한 단계만 (작업끼리 파일이 안 이어지므로 data 는 setup 도 먼저 한다)
 # KEY=값 (이슈 한 줄 명령에는 환경 변수를 못 넣으므로 인자로):
 #   ARMS=base,sep,ours   돌릴 팔 (쉼표, 안 주면 이 셋). base = 기준선 · sep = 모양 + 스케일 학생을 MS2 만으로 ·
@@ -34,7 +36,7 @@
 #                        rtfn = rtf 에서 크기 바꾸기 증강만 뺌 (진단) · rtc = 라벨을 환산하는 대신 입력 영상을 기준 초점의 크기로 맞춰 넣는다 (학습의 쌍 · 평가의 모든 영상)
 #                      rtkp · rtfnp = 모양도 쌍으로 (README '모양도 쌍으로'): 2 단계는 rtk · rtfn 과 똑같고, 1 단계에 쌍 넷의 선생 깊이 (모양만) 를 더한다 (train_rel.py --pairs). 두 팔이 1 단계를 함께 쓴다.
 #                      ours · rtp · rts · mtd 가 들어 있으면 학습 전에 선생 라벨을 한 번 뽑는다 (src/labels.py, 37,233 장) — 환경은 선생 점검의 것 (envs/teacher.txt) 을 쓴다
-#   SETS=<세트,…>      평가할 세트 (all · smoke · eval 모드). 안 주면 전부. 단계 2 는 MS2 test 만 (처음 보는 대상은 설계에 쓰지 않으므로 보지 않는다)
+#   SETS=<세트,…>      평가할 세트 (all · smoke · eval · rgbref 모드 — rgbref 는 열화상 입력 쪽만). 안 주면 전부. 단계 2 는 MS2 test 만 (처음 보는 대상은 설계에 쓰지 않으므로 보지 않는다)
 #   JIT=<배율,…>       rtf · rtk 의 크기 바꾸기 증강 배율 (기본 0.71–1.41 아홉). 로컬 흐름 시험은 메모리 때문에 1 이하만 준다
 #   FSWEEP=<배율,…>    초점거리 민감도 (README '초점거리 민감도'): 평가 때 카메라 값의 fx · fy 에 이 배율을 곱해 한 번씩 더 잰다 (예 0.8,0.9,1.1,1.2).
 #                      카메라 정보를 쓰는 팔 (rtf · rtk · rtj · rtfn · rtc) 만 — 다른 팔은 건너뛴다. 안 주면 안 잰다. 학습과 원래 지표는 바뀌지 않는다 ([표7])
@@ -58,7 +60,7 @@ cd "$(dirname "$0")" || exit 1
 REPO=$PWD
 MODE=${1:-}
 [ $# -gt 0 ] && shift
-MODES="check setup data smoke all eval teacher relcheck labelcheck prior shape"
+MODES="check setup data smoke all eval teacher relcheck labelcheck prior shape rgbref"
 [[ " $MODES " == *" $MODE "* ]] && [ -n "$MODE" ] || { echo "!!! 모드: ${MODES// / | } (받은 값: '$MODE'). 사용법은 run.sh 맨 위"; exit 2; }
 KEYS="ARMS SEEDS EPOCHS BS PAIR_BS AMP LIMIT WORKERS ENC LINKS FROM SETS KIND CKPT STALL_MIN PROGRESS_SEC RETRY JOB DRY_RUN WORK PY APP_ROOT DATA_DIR HF_DIR JIT FSWEEP DATA_REPO DATA_TOKEN HOLD"
 for k in $KEYS; do unset "$k"; done            # 컨테이너 환경 변수와 섞이지 않게 — 값은 KEY=값 인자로만
@@ -230,7 +232,7 @@ mkenv_body() {
 }
 TPY=""
 # UniDepthV2 가 필요한가: 선생 점검, 그리고 팔 ours · rtp · rts · rtn · rtf · rtk · rtj · rtfn · rtc · rtkp · rtfnp · mtd 를 학습하는 작업 (선생 라벨을 뽑는다). 그때는 학습 환경 + UniDepthV2 가 쓰는 꾸러미 (envs/teacher.txt, torch 판은 같다)
-NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ] || [ "$MODE" = shape ]; } && NEED_UD=1
+NEED_UD=0; { [ "$MODE" = teacher ] || [ "$MODE" = labelcheck ] || [ "$MODE" = shape ] || [ "$MODE" = rgbref ]; } && NEED_UD=1
 case "$MODE:,$ARMS," in smoke:*,ours,*|all:*,ours,*|smoke:*,rtp,*|all:*,rtp,*|smoke:*,rts,*|all:*,rts,*|smoke:*,mtd,*|all:*,mtd,*|smoke:*,rtn,*|all:*,rtn,*|smoke:*,rtf,*|all:*,rtf,*|smoke:*,rtk,*|all:*,rtk,*|smoke:*,rtj,*|all:*,rtj,*|smoke:*,rtfn,*|all:*,rtfn,*|smoke:*,rtc,*|all:*,rtc,*|smoke:*,rtkp,*|all:*,rtkp,*|smoke:*,rtfnp,*|all:*,rtfnp,*) NEED_UD=1;; esac   # 선생 라벨을 쓰는 팔
 ENVNAME=train; [ $NEED_UD = 1 ] && ENVNAME=teacher
 [ "$MODE" = prior ] && ENVNAME=teacher                            # 선행 방법의 공식 코드는 이 환경 (torch 2.7.1 · timm · scipy · matplotlib) 에서 돌려 봤다
@@ -474,6 +476,17 @@ case "$MODE" in
       ${LINKS:+--links "$LINKS"} "${s[@]}" || fail "데이터 실패"
     run_step "선행 평가" "$LOGS/prior.log" show "$TPY" -I -B -u src/prior_eval.py --code "$TD_MONO" "${pw[@]}" --encoder "$ENC" --out "$OUTJ/prior" \
       --workers "$WORKERS" --limit "$LIMIT" ${SETS:+--sets "$SETS"} || fail "선행 평가 실패"
+    zip_results;;
+  rgbref)                                                         # RGB 기준 (README 15 절): RGB 용 metric 모델 (UniDepthV2) 을 열화상 · ViViD 의 RGB 에 — 학습 없음
+    setup_all || fail "준비 실패"
+    lk=test_day.tar,test_night.tar,test_rainy.tar,firestereo_test.tar,vivid.tar,vivid_indoor.tar,sthereo.tar,vivid_day_rgb.tar,vivid_rgb_eval.tar   # 평가 묶음 + ViViD 의 RGB 시점
+    [ "$KIND" = smoke ] && lk=smoke.tar,smoke_rgb.tar
+    s=(--search); [ -d "$APP/data" ] && s+=("$APP/data"); [ -n "$DATA_DIR" ] && s+=("$DATA_DIR")
+    WATCH="$WORK/dl/*.part" run_step data "$LOGS/data.log" show "$SYSPY" -I -B -u setup/get_data.py --kind all --only "$lk" --dest "$TD_DATA" --dl "$WORK/dl" \
+      ${LINKS:+--links "$LINKS"} "${s[@]}" || fail "데이터 실패"
+    off=(env); [ "$ENC" = vitl ] || off=(env -u HF_HUB_OFFLINE)   # 작은 인코더 (로컬 흐름 시험) 의 UniDepthV2 는 목록에 없어 그때 받는다
+    run_step "RGB 기준" "$LOGS/rgbref.log" show "${off[@]}" "$TPY" -I -B -u src/rgb_eval.py --out "$OUTJ/rgbref" --encoder "$ENC" \
+      --workers "$WORKERS" --limit "$LIMIT" ${SETS:+--sets "$SETS"} || fail "RGB 기준 실패"
     zip_results;;
   eval)
     src=$OUTROOT/$FROM/ckpt
